@@ -64,7 +64,7 @@ if not check_password():
 # --- 3. UI RENDERING FUNCTIONS ---
 # ==============================================================================
 
-def render_risk_tower(df_all_tools, run_interval_hours, min_shots_filter, tolerance, downtime_gap_tolerance):
+def render_risk_tower(df_all_tools, run_interval_hours, min_shots_filter, tolerance, downtime_gap_tolerance, startup_thresh, startup_count):
     """Renders the Risk Tower tab."""
     st.title("Run Rate Risk Tower")
     st.info(
@@ -95,7 +95,7 @@ def render_risk_tower(df_all_tools, run_interval_hours, min_shots_filter, tolera
             - <span style='background-color:#77dd77;color:black;padding:2px 5px;border-radius:5px;'>Green (>70)</span>: Low Risk
         """, unsafe_allow_html=True)
 
-    risk_df = rr_utils.calculate_risk_scores(df_all_tools, run_interval_hours, min_shots_filter, tolerance, downtime_gap_tolerance)
+    risk_df = rr_utils.calculate_risk_scores(df_all_tools, run_interval_hours, min_shots_filter, tolerance, downtime_gap_tolerance, startup_thresh, startup_count)
 
     if risk_df.empty:
         st.warning("Not enough data across multiple tools in the last 4 weeks to generate a risk tower.")
@@ -121,7 +121,7 @@ def render_risk_tower(df_all_tools, run_interval_hours, min_shots_filter, tolera
 
 
 def render_trends_tab(df_tool, tolerance, downtime_gap_tolerance,
-                      run_interval_hours, min_shots_filter,
+                      run_interval_hours, min_shots_filter, startup_thresh, startup_count,
                       tool_id_selection='Unknown'):
     """Renders the Trends Analysis tab."""
     st.header("Historical Performance Trends")
@@ -155,14 +155,10 @@ def render_trends_tab(df_tool, tolerance, downtime_gap_tolerance,
     else:
         period_name = "Month"
 
-    # #9 fix: run ONE global processing pass on the full tool dataset so that
-    # mode_ct, stop_flag and run boundaries are consistent across all periods.
-    # df_tool is always raw (a slice of df_filtered) so we always need this pass.
-    # Downstream calculate_run_summaries calls use pre_processed=True so they
-    # slice the result without recomputing mode_ct from the period subset.
     _prep = rr_utils.RunRateCalculator(
         df_tool, tolerance, downtime_gap_tolerance,
-        analysis_mode='aggregate', run_interval_hours=run_interval_hours
+        analysis_mode='aggregate', run_interval_hours=run_interval_hours,
+        startup_stop_threshold_minutes=startup_thresh, startup_shot_count=startup_count
     )
     df_tool_proc = _prep.results.get("processed_df", df_tool)
 
@@ -180,7 +176,9 @@ def render_trends_tab(df_tool, tolerance, downtime_gap_tolerance,
         run_summaries = rr_utils.calculate_run_summaries(
             df_period, tolerance, downtime_gap_tolerance,
             run_interval_hours=run_interval_hours,
-            pre_processed=True
+            pre_processed=True,
+            startup_stop_threshold_minutes=startup_thresh,
+            startup_shot_count=startup_count
         )
         if run_summaries.empty:
             continue
@@ -195,6 +193,7 @@ def render_trends_tab(df_tool, tolerance, downtime_gap_tolerance,
         stops = run_summaries['stops'].sum()
         total_shots = run_summaries['total_shots'].sum()
         normal_shots = run_summaries['normal_shots'].sum()
+        startup_shots = run_summaries.get('startup_shots', pd.Series(dtype=int)).sum()
 
         stability = (prod_time / total_runtime * 100) if total_runtime > 0 else 0
         efficiency = (normal_shots / total_shots * 100) if total_shots > 0 else 0
@@ -216,7 +215,8 @@ def render_trends_tab(df_tool, tolerance, downtime_gap_tolerance,
             'MTTR (min)': mttr,
             'MTBF (min)': mtbf,
             'Total Shots': total_shots,
-            'Normal Shots': normal_shots,  # #11 fix: was missing, caused blank in PPTX
+            'Normal Shots': normal_shots, 
+            'Start-up Shots': startup_shots,
             'Stop Events': stops,
             'Production Time (h)': prod_time / 3600,
             'Downtime (h)': downtime / 3600,
@@ -234,8 +234,8 @@ def render_trends_tab(df_tool, tolerance, downtime_gap_tolerance,
         df_trends.style.format({
             'Stability Index (%)': '{:.1f}', 'Efficiency (%)': '{:.1f}',
             'MTTR (min)': '{:.1f}', 'MTBF (min)': '{:.1f}',
-            'Total Shots': '{:,.0f}', 'Stop Events': '{:,.0f}',
-            'Production Time (h)': '{:.1f}', 'Downtime (h)': '{:.1f}',
+            'Total Shots': '{:,.0f}', 'Normal Shots': '{:,.0f}', 'Start-up Shots': '{:,.0f}', 
+            'Stop Events': '{:,.0f}', 'Production Time (h)': '{:.1f}', 'Downtime (h)': '{:.1f}',
         }).background_gradient(subset=['Stability Index (%)'],
                                cmap='RdYlGn', vmin=0, vmax=100),
         width='stretch'
@@ -293,7 +293,8 @@ def render_trends_tab(df_tool, tolerance, downtime_gap_tolerance,
 
 
 def render_dashboard(df_tool, tool_id_selection, tolerance, downtime_gap_tolerance,
-                     run_interval_hours, show_approved_ct, min_shots_filter):
+                     run_interval_hours, show_approved_ct, min_shots_filter,
+                     startup_thresh, startup_count):
     """Renders the main Run Rate Dashboard tab."""
 
     analysis_level = st.radio(
@@ -305,34 +306,18 @@ def render_dashboard(df_tool, tool_id_selection, tolerance, downtime_gap_toleran
 
     st.markdown("---")
 
-    # ------------------------------------------------------------------
-    # FIX: get_processed_data now takes the user's tolerance params so
-    # that mode_ct, lower_limit, and upper_limit columns in df_processed
-    # are always computed with the correct slider values.
-    # The cache key includes tolerance + downtime_gap_tolerance so any
-    # slider change automatically triggers a fresh computation.
-    # ------------------------------------------------------------------
     @st.cache_data(show_spinner="Performing initial data processing...")
-    def get_processed_data(df, interval_hours, tolerance, downtime_gap_tolerance):
+    def get_processed_data(df, interval_hours, tolerance, downtime_gap_tolerance, startup_thresh, startup_count):
         """
         Single authoritative processing pass over the FULL tool dataset.
-
-        Passing the full df (not a day/week slice) ensures mode_ct is computed
-        from the correct run boundaries.  Slicing df_processed afterward for
-        display preserves those pre-computed mode_ct, stop_flag, lower_limit
-        and upper_limit values — no re-computation ever happens on a subset.
-
-        CRCG alignment: stop_flag is reset to 0 for the first shot of every
-        run (mask_first_shot | is_new_run) so that a hard-stop or abnormal CT
-        at the very start of a run is never counted as a stop event.
         """
         base_calc = rr_utils.RunRateCalculator(
             df, tolerance, downtime_gap_tolerance,
-            analysis_mode='aggregate', run_interval_hours=interval_hours
+            analysis_mode='aggregate', run_interval_hours=interval_hours,
+            startup_stop_threshold_minutes=startup_thresh, startup_shot_count=startup_count
         )
         df_processed = base_calc.results.get("processed_df", pd.DataFrame())
         if not df_processed.empty:
-            # Apply CRCG run-start reset
             mask_first = df_processed['tool_id'] != df_processed['tool_id'].shift(1)
             is_new_run = df_processed['time_diff_sec'] > (interval_hours * 3600)
             df_processed.loc[mask_first | is_new_run, 'stop_flag'] = 0
@@ -343,8 +328,6 @@ def render_dashboard(df_tool, tool_id_selection, tolerance, downtime_gap_toleran
                 (df_processed['stop_flag'] == 1)
                 & (df_processed['prev_stop_flag'] == 0)
             )
-            # #3 fix: recalculate run_group after stop_flag reset so bucket
-            # analysis and run counts reflect the corrected run boundaries
             df_processed['run_group'] = df_processed['stop_event'].cumsum()
             df_processed['week'] = df_processed['shot_time'].dt.isocalendar().week
             df_processed['year'] = df_processed['shot_time'].dt.isocalendar().year
@@ -353,7 +336,7 @@ def render_dashboard(df_tool, tool_id_selection, tolerance, downtime_gap_toleran
         return df_processed
 
     df_processed = get_processed_data(
-        df_tool, run_interval_hours, tolerance, downtime_gap_tolerance
+        df_tool, run_interval_hours, tolerance, downtime_gap_tolerance, startup_thresh, startup_count
     )
 
     detailed_view = st.toggle("Show Detailed Analysis", value=True, key="rr_detailed_view")
@@ -497,8 +480,6 @@ def render_dashboard(df_tool, tool_id_selection, tolerance, downtime_gap_toleran
     if not df_view.empty:
         df_view = df_view.copy()
         if 'run_id' in df_view.columns:
-            # #18 fix: sort by first shot_time of each run before labelling
-            # so Run 001 is always the earliest run, matching the Excel export
             run_first_shot = (df_view.groupby('run_id')['shot_time']
                               .min().sort_values())
             run_label_map = {rid: f"Run {i+1:03d}"
@@ -526,9 +507,9 @@ def render_dashboard(df_tool, tool_id_selection, tolerance, downtime_gap_toleran
     # ------------------------------------------------------------------
     # KPI computation
     # ------------------------------------------------------------------
-    # Run summaries (for MTTR, MTBF, stability, etc.)
     run_summary_df_for_totals = rr_utils.calculate_run_summaries(
-        df_view, tolerance, downtime_gap_tolerance, pre_processed=True
+        df_view, tolerance, downtime_gap_tolerance, pre_processed=True,
+        startup_stop_threshold_minutes=startup_thresh, startup_shot_count=startup_count
     )
 
     summary_metrics = {}
@@ -538,6 +519,7 @@ def render_dashboard(df_tool, tool_id_selection, tolerance, downtime_gap_toleran
         downtime_sec = run_summary_df_for_totals['downtime_sec'].sum()
         total_shots = run_summary_df_for_totals['total_shots'].sum()
         normal_shots = run_summary_df_for_totals['normal_shots'].sum()
+        startup_shots = run_summary_df_for_totals.get('startup_shots', pd.Series(dtype=int)).sum()
         stop_events = run_summary_df_for_totals['stops'].sum()
 
         summary_metrics = {
@@ -546,6 +528,7 @@ def render_dashboard(df_tool, tool_id_selection, tolerance, downtime_gap_toleran
             'downtime_sec': downtime_sec,
             'total_shots': total_shots,
             'normal_shots': normal_shots,
+            'startup_shots': startup_shots,
             'stop_events': stop_events,
             'mttr_min': (downtime_sec / 60 / stop_events) if stop_events > 0 else 0,
             'mtbf_min': ((production_time_sec / 60 / stop_events)
@@ -556,18 +539,6 @@ def render_dashboard(df_tool, tool_id_selection, tolerance, downtime_gap_toleran
         }
         sub_header = sub_header.replace("Summary for", "Summary for (Combined Runs)")
 
-    # ------------------------------------------------------------------
-    # FIX: CT display metrics read from df_view's pre-computed columns.
-    #
-    # df_view is a slice of df_processed, which was built by the single
-    # authoritative RunRateCalculator call in get_processed_data().
-    # That call operated on the FULL tool dataset, so mode_ct/limits are
-    # computed from the correct run boundaries — NOT from the day slice.
-    #
-    # Previously a fresh RunRateCalculator(df_view) was called here,
-    # which recalculated mode_ct from only the subset of shots in the
-    # selected period, causing the 0.1 discrepancy (e.g. 101.6 vs 101.5).
-    # ------------------------------------------------------------------
     if 'mode_ct' in df_view.columns:
         summary_metrics['min_mode_ct'] = df_view['mode_ct'].min()
         summary_metrics['max_mode_ct'] = df_view['mode_ct'].max()
@@ -597,9 +568,6 @@ def render_dashboard(df_tool, tool_id_selection, tolerance, downtime_gap_toleran
         summary_metrics['min_approved_ct'] = np.nan
         summary_metrics['max_approved_ct'] = np.nan
 
-    # We still need a results dict for the bar chart, run_durations, hourly_summary etc.
-    # build_display_results uses df_view's pre-computed columns so no mode
-    # recomputation occurs on the day/week slice.
     results = rr_utils.build_display_results(df_view, run_interval_hours)
 
     # ------------------------------------------------------------------
@@ -609,7 +577,8 @@ def render_dashboard(df_tool, tool_id_selection, tolerance, downtime_gap_toleran
     run_summary_df = None
     if "by Run" in analysis_level:
         trend_summary_df = rr_utils.calculate_run_summaries(
-            df_view, tolerance, downtime_gap_tolerance, pre_processed=True
+            df_view, tolerance, downtime_gap_tolerance, pre_processed=True,
+            startup_stop_threshold_minutes=startup_thresh, startup_shot_count=startup_count
         )
         if trend_summary_df is not None and not trend_summary_df.empty:
             trend_summary_df.rename(columns={
@@ -631,7 +600,7 @@ def render_dashboard(df_tool, tool_id_selection, tolerance, downtime_gap_toleran
             label="📥 Export Run-Based Report",
             data=rr_utils.prepare_and_generate_run_based_excel(
                 df_view.copy(), tolerance, downtime_gap_tolerance,
-                run_interval_hours, tool_id_selection
+                run_interval_hours, tool_id_selection, startup_thresh, startup_count
             ),
             file_name=(
                 f"Run_Based_Report_"
@@ -730,11 +699,13 @@ def render_dashboard(df_tool, tool_id_selection, tolerance, downtime_gap_toleran
         """)
 
     with st.container(border=True):
-        c1, c2, c3 = st.columns(3)
+        c1, c2, c3, c4 = st.columns(4)
         t_s = summary_metrics.get('total_shots', 0)
         n_s = summary_metrics.get('normal_shots', 0)
-        s_s = t_s - n_s
+        su_s = summary_metrics.get('startup_shots', 0)
+        s_s = t_s - n_s - su_s
         n_p = (n_s / t_s * 100) if t_s > 0 else 0
+        su_p = (su_s / t_s * 100) if t_s > 0 else 0
         s_p = (s_s / t_s * 100) if t_s > 0 else 0
         with c1:
             st.metric("Total Shots", f"{t_s:,}")
@@ -747,6 +718,14 @@ def render_dashboard(df_tool, tool_id_selection, tolerance, downtime_gap_toleran
                 unsafe_allow_html=True
             )
         with c3:
+            st.metric("Start-up Shots", f"{su_s:,}")
+            st.markdown(
+                f'<span style="background-color:#9b59b6;'
+                f'color:#FFFFFF;padding:3px 8px;border-radius:10px;'
+                f'font-size:0.8rem;font-weight:bold;">{su_p:.1f}% of Total</span>',
+                unsafe_allow_html=True
+            )
+        with c4:
             st.metric("Stop Events", f"{summary_metrics.get('stop_events', 0)}")
             st.markdown(
                 f'<span style="background-color:{rr_utils.PASTEL_COLORS["red"]};'
@@ -816,10 +795,9 @@ def render_dashboard(df_tool, tool_id_selection, tolerance, downtime_gap_toleran
                 }
                 analysis_df.rename(columns=rename_map, inplace=True)
 
-            # #10 fix: validate required columns exist before calling analysis
             _required = {'period', 'stability', 'stops', 'mttr'}
             if not analysis_df.empty and not _required.issubset(analysis_df.columns):
-                analysis_df = pd.DataFrame()  # fall through to "not enough data"
+                analysis_df = pd.DataFrame()
 
             insights = rr_utils.generate_detailed_analysis(
                 analysis_df,
@@ -868,12 +846,12 @@ def render_dashboard(df_tool, tool_id_selection, tolerance, downtime_gap_toleran
 
     with st.expander("View Shot Data Table", expanded=False):
         cols_to_show = ['shot_time', 'ACTUAL CT', 'adj_ct_sec',
-                        'time_diff_sec', 'stop_flag', 'stop_event']
+                        'time_diff_sec', 'stop_flag', 'startup_flag', 'stop_event']
         rename_map = {
             'shot_time': 'Date / Time', 'ACTUAL CT': 'Actual CT (sec)',
             'approved_ct': 'Approved CT', 'adj_ct_sec': 'Adjusted CT (sec)',
             'time_diff_sec': 'Time Difference (sec)',
-            'stop_flag': 'Stop Flag', 'stop_event': 'Stop Event'
+            'stop_flag': 'Stop Flag', 'startup_flag': 'Start-up Flag', 'stop_event': 'Stop Event'
         }
         if show_approved_ct and 'approved_ct' in results['processed_df'].columns:
             cols_to_show.insert(1, 'approved_ct')
@@ -881,7 +859,7 @@ def render_dashboard(df_tool, tool_id_selection, tolerance, downtime_gap_toleran
             cols_to_show.append('run_label')
             rename_map['run_label'] = 'Run ID'
 
-        df_shot_data = results['processed_df'][cols_to_show].copy()
+        df_shot_data = results['processed_df'][[c for c in cols_to_show if c in results['processed_df'].columns]].copy()
         df_shot_data.rename(columns=rename_map, inplace=True)
         st.dataframe(df_shot_data)
 
@@ -908,8 +886,6 @@ def render_dashboard(df_tool, tool_id_selection, tolerance, downtime_gap_toleran
     complete_runs = pd.DataFrame()
     if not stop_events_df.empty:
         stop_events_df['terminated_run_group'] = stop_events_df['run_group'] - 1
-        # Keep only the first stop event per run_group to guarantee a unique
-        # index — pandas 2.x raises InvalidIndexError on duplicate index in .map()
         end_time_map = (stop_events_df
                         .drop_duplicates(subset='terminated_run_group', keep='first')
                         .set_index('terminated_run_group')['shot_time'])
@@ -936,14 +912,22 @@ def render_dashboard(df_tool, tool_id_selection, tolerance, downtime_gap_toleran
 
                 d_df["Normal Shots"] = d_df.apply(
                     lambda r: (
-                        f"{r['normal_shots']:,} "
-                        f"({r['normal_shots'] / r[total_shots_col] * 100:.1f}%)"
+                        f"{r.get('normal_shots', 0):,} "
+                        f"({r.get('normal_shots', 0) / r[total_shots_col] * 100:.1f}%)"
+                        if r[total_shots_col] > 0 else "0 (0.0%)"
+                    ), axis=1
+                )
+
+                d_df["Start-up Shots"] = d_df.apply(
+                    lambda r: (
+                        f"{r.get('startup_shots', 0):,} "
+                        f"({r.get('startup_shots', 0) / r[total_shots_col] * 100:.1f}%)"
                         if r[total_shots_col] > 0 else "0 (0.0%)"
                     ), axis=1
                 )
 
                 if 'stopped_shots' not in d_df.columns:
-                    d_df['stopped_shots'] = d_df[total_shots_col] - d_df['normal_shots']
+                    d_df['stopped_shots'] = d_df[total_shots_col] - d_df.get('normal_shots', 0) - d_df.get('startup_shots', 0)
 
                 stops_col = 'STOPS' if 'STOPS' in d_df.columns else 'stops'
                 d_df["Stop Events"] = d_df.apply(
@@ -988,7 +972,7 @@ def render_dashboard(df_tool, tool_id_selection, tolerance, downtime_gap_toleran
 
                 final_cols = [
                     'RUN ID', 'Period (date/time from to)', 'Total shots',
-                    'Normal Shots', 'Stop Events', 'Mode CT (for the run)',
+                    'Normal Shots', 'Start-up Shots', 'Stop Events', 'Mode CT (for the run)',
                     'Approved CT', 'Lower limit CT (sec)', 'Upper Limit CT (sec)',
                     'Total Run duration (d/h/m)', 'Production Time (d/h/m)',
                     'Downtime (d/h/m)', 'MTTR (min)', 'MTBF (min)', 'Stability (%)'
@@ -1211,7 +1195,7 @@ def render_dashboard(df_tool, tool_id_selection, tolerance, downtime_gap_toleran
 # --- 4. MAIN APP ENTRY POINT ---
 # ==============================================================================
 
-APP_VERSION = "v3.53"
+APP_VERSION = "v3.60"
 
 def run_run_rate_ui():
 
@@ -1251,15 +1235,9 @@ def run_run_rate_ui():
 
     # ------------------------------------------------------------------
     # Hierarchy filter chain
-    #
-    # All filters are always shown in the sidebar.
-    # If a column is absent from the data, the filter shows "Not Available".
-    # NaN / blank values are normalised to "Not Available".
-    # Each filter cascades — options narrow based on selections above.
     # ------------------------------------------------------------------
 
     HIERARCHY_COLS = [
-        # (internal col,   sidebar label,   session-state key)
         ("project_id",    "Project",       "rr_f_project"),
         ("supplier_name", "Supplier",      "rr_f_supplier"),
         ("tooling_type",  "Tooling Type",  "rr_f_tooling_type"),
@@ -1269,11 +1247,6 @@ def run_run_rate_ui():
     NA_LABEL = "Not Available"
 
     def _normalise_col(df, col):
-        """
-        Fills NaN / blank / unknown values with NA_LABEL directly on df.
-        Callers must ensure df is already a copy before calling.
-        Returns the modified df.
-        """
         if col not in df.columns:
             df[col] = NA_LABEL
         else:
@@ -1285,13 +1258,11 @@ def run_run_rate_ui():
         return df
 
     def _get_opts(df, col):
-        """Sorted unique values for a column that has already been normalised."""
         if col not in df.columns:
             return [NA_LABEL]
         opts = sorted(df[col].unique().tolist())
         return opts if opts else [NA_LABEL]
 
-    # Normalise all hierarchy columns on a working copy
     df_filtered = df_all.copy()
     for col, _, _ in HIERARCHY_COLS:
         df_filtered = _normalise_col(df_filtered, col)
@@ -1301,16 +1272,12 @@ def run_run_rate_ui():
     for col, label, key in HIERARCHY_COLS:
         opts = _get_opts(df_filtered, col)
 
-        # If the only option is the placeholder, show it disabled-looking
-        # but don't let it block the filter chain
         if opts == [NA_LABEL]:
             st.sidebar.multiselect(label, [NA_LABEL], default=[NA_LABEL],
                                    key=key, disabled=True)
             continue
 
         sel = st.sidebar.multiselect(label, opts, default=opts, key=key)
-
-        # Apply selection — if nothing selected default to all (avoids empty df)
         active = sel if sel else opts
         df_filtered = df_filtered[df_filtered[col].isin(active)]
 
@@ -1319,8 +1286,7 @@ def run_run_rate_ui():
         st.stop()
 
     # ------------------------------------------------------------------
-    # Tool selection — always visible, cascades from filters above.
-    # Multiselect narrows the pool shown in the dashboard selectbox below.
+    # Tool selection
     # ------------------------------------------------------------------
     available_tool_ids = sorted(df_filtered[id_col].unique().tolist())
     if not available_tool_ids:
@@ -1369,6 +1335,16 @@ def run_run_rate_ui():
             key="rr_run_interval",
             help="Max hours between shots before a new Production Run is identified."
         )
+        startup_stop_threshold_minutes = st.slider(
+            "Start-up Stop Threshold (min)", 1.0, 60.0, 5.0, 0.5,
+            key="rr_startup_thresh",
+            help="Minimum stop duration to trigger start-up shots."
+        )
+        startup_shot_count = st.slider(
+            "Start-up Shot Count", 0, 50, 5, 1,
+            key="rr_startup_count",
+            help="Number of shots to label as start-up shots after a qualifying stop."
+        )
 
         enable_min_shots = st.checkbox(
             "Filter Small Production Runs", value=False, key="rr_filter_enable"
@@ -1391,7 +1367,6 @@ def run_run_rate_ui():
     # Resolve the data slice for the dashboard tabs
     # ------------------------------------------------------------------
     if dashboard_tool_id_selection == "All Tools (Risk Tower)":
-        # Show Risk Tower in tab1. Dashboard and Trends need a specific tool.
         df_for_dashboard = pd.DataFrame()
         tool_id_for_dashboard_display = "No Tool Selected"
     else:
@@ -1402,20 +1377,19 @@ def run_run_rate_ui():
 
     # ------------------------------------------------------------------
     # Tabs
-    # Risk Tower always uses the full filter-scoped dataset (df_filtered)
-    # so it shows all matched tools, not just the selected one.
     # ------------------------------------------------------------------
     tab1, tab2, tab3 = st.tabs(["Risk Tower", "Run Rate Dashboard", "Trends"])
 
     with tab1:
-        render_risk_tower(df_filtered, run_interval_hours, min_shots_filter, tolerance, downtime_gap_tolerance)
+        render_risk_tower(df_filtered, run_interval_hours, min_shots_filter, tolerance, downtime_gap_tolerance, startup_stop_threshold_minutes, startup_shot_count)
 
     with tab2:
         if not df_for_dashboard.empty:
             render_dashboard(
                 df_for_dashboard, tool_id_for_dashboard_display,
                 tolerance, downtime_gap_tolerance, run_interval_hours,
-                show_approved_ct, min_shots_filter
+                show_approved_ct, min_shots_filter,
+                startup_stop_threshold_minutes, startup_shot_count
             )
         else:
             st.info("👈 Select a specific tool from the **Dashboard View** dropdown in the sidebar to view its dashboard.")
@@ -1424,7 +1398,7 @@ def run_run_rate_ui():
         if not df_for_dashboard.empty:
             render_trends_tab(
                 df_for_dashboard, tolerance, downtime_gap_tolerance,
-                run_interval_hours, min_shots_filter,
+                run_interval_hours, min_shots_filter, startup_stop_threshold_minutes, startup_shot_count,
                 tool_id_selection=tool_id_for_dashboard_display
             )
         else:

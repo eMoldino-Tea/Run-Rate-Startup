@@ -25,9 +25,6 @@ PASTEL_COLORS = {
 }
 
 
-
-
-
 def format_minutes_to_dhm(total_minutes):
     """Converts total minutes into a human-readable duration string.
     Shows minutes + seconds for values under 10 minutes for precision.
@@ -69,6 +66,7 @@ def get_renamed_summary_df(df_in):
         'hour': 'Hour', 'date': 'Date', 'week': 'Week', 'RUN ID': 'RUN ID',
         'run_label': 'RUN ID', 'stops': 'Stops', 'STOPS': 'Stops',
         'total_shots': 'Total Shots', 'Total Shots': 'Total Shots',
+        'normal_shots': 'Normal Shots', 'startup_shots': 'Start-up Shots',
         'mttr_min': 'MTTR (min)', 'MTTR (min)': 'MTTR (min)',
         'mtbf_min': 'MTBF (min)', 'MTBF (min)': 'MTBF (min)',
         'stability_index': 'Stability Index (%)', 'STABILITY %': 'Stability Index (%)',
@@ -83,7 +81,7 @@ def get_renamed_summary_df(df_in):
 
     display_order = [
         'Hour', 'Date', 'Week', 'RUN ID', 'Approved CT', 'Mode CT',
-        'Stops', 'Total Shots', 'Stability Index (%)', 'MTTR (min)', 'MTBF (min)'
+        'Stops', 'Total Shots', 'Normal Shots', 'Start-up Shots', 'Stability Index (%)', 'MTTR (min)', 'MTBF (min)'
     ]
     final_cols = [col for col in display_order if col in df_renamed.columns]
     for col in df_renamed.columns:
@@ -97,17 +95,6 @@ def get_renamed_summary_df(df_in):
 def load_all_data(files, _cache_version=None):
     """
     Loads and standardises production shot data from uploaded files.
-
-    Primary column names are the live database column names.
-    Alias lists are kept as fallbacks so legacy Excel exports continue to work.
-
-    DB column → internal name mapping:
-        EQUIPMENT_CODE   → tool_id
-        CT               → ACTUAL CT
-        APPROVED_CT      → approved_ct
-        LOCAL_SHOT_TIME  → shot_time   (DD/MM/YYYY HH:MM:SS.fff, dayfirst=True)
-        SUPPLIER_NAME    → preserved as-is for Excel export
-        COUNTER_CODE     → SESSION ID column in Excel export
     """
     df_list = []
     for file in files:
@@ -120,18 +107,12 @@ def load_all_data(files, _cache_version=None):
             col_map = {col.strip().upper(): col for col in df.columns}
 
             def get_col(*targets):
-                """Return the first matching original column name, or None."""
                 for t in targets:
                     found = col_map.get(t.strip().upper())
                     if found is not None:
                         return found
                 return None
 
-            # ------------------------------------------------------------------
-            # Tool ID
-            # DB primary: EQUIPMENT_CODE
-            # Legacy aliases: TOOLING ID, EQUIPMENT CODE, TOOL_ID
-            # ------------------------------------------------------------------
             tool_id_col = get_col(
                 "EQUIPMENT_CODE",
                 "TOOLING ID", "EQUIPMENT CODE", "TOOL_ID"
@@ -139,11 +120,6 @@ def load_all_data(files, _cache_version=None):
             if tool_id_col:
                 df.rename(columns={tool_id_col: "tool_id"}, inplace=True)
 
-            # ------------------------------------------------------------------
-            # Actual cycle time
-            # DB primary: CT
-            # Legacy aliases: ACTUAL CT, ACTUAL_CT, CYCLE TIME
-            # ------------------------------------------------------------------
             actual_ct_col = get_col(
                 "CT",
                 "ACTUAL CT", "ACTUAL_CT", "CYCLE TIME"
@@ -151,11 +127,6 @@ def load_all_data(files, _cache_version=None):
             if actual_ct_col:
                 df.rename(columns={actual_ct_col: "ACTUAL CT"}, inplace=True)
 
-            # ------------------------------------------------------------------
-            # Approved cycle time
-            # DB primary: APPROVED_CT
-            # Legacy aliases: APPROVED CT, STANDARD CT, STD CT
-            # ------------------------------------------------------------------
             approved_ct_col = get_col(
                 "APPROVED_CT",
                 "APPROVED CT", "STANDARD CT", "STD CT"
@@ -165,12 +136,6 @@ def load_all_data(files, _cache_version=None):
             else:
                 df["approved_ct"] = np.nan
 
-            # ------------------------------------------------------------------
-            # Shot timestamp
-            # DB primary: LOCAL_SHOT_TIME  (DD/MM/YYYY HH:MM:SS.fff — dayfirst)
-            # Legacy aliases: SHOT TIME, TIMESTAMP, DATE, TIME
-            # Also handles legacy YEAR/MONTH/DAY/TIME split columns
-            # ------------------------------------------------------------------
             if {"YEAR", "MONTH", "DAY", "TIME"}.issubset(set(col_map.keys())):
                 datetime_str = (
                     df[col_map["YEAR"]].astype(str) + "-"
@@ -185,46 +150,21 @@ def load_all_data(files, _cache_version=None):
                     "SHOT TIME", "TIMESTAMP", "DATE", "TIME"
                 )
                 if shot_time_col:
-                    # Try the DB format (DD/MM/YYYY ...) first; if that
-                    # produces mostly NaT fall back to letting pandas infer
-                    # (handles YYYY-MM-DD and other legacy formats).
                     parsed = pd.to_datetime(
                         df[shot_time_col], dayfirst=True, errors="coerce"
                     )
                     nat_ratio = parsed.isna().mean()
                     if nat_ratio > 0.5:
-                        # Fallback: let pandas infer (handles YYYY-MM-DD etc.)
-                        # infer_datetime_format removed in pandas 2.2 — use
-                        # format=mixed which works across pandas 1.x and 2.x
                         parsed = pd.to_datetime(
                             df[shot_time_col], format="mixed",
                             dayfirst=True, errors="coerce"
                         )
                     df["shot_time"] = parsed
 
-            # ------------------------------------------------------------------
-            # Session / counter ID (optional — used in Excel export)
-            # DB primary: COUNTER_CODE
-            # Legacy alias: SESSION ID
-            # Renamed to SESSION ID so the export module finds it unchanged
-            # ------------------------------------------------------------------
             session_col = get_col("COUNTER_CODE", "SESSION ID")
             if session_col and session_col != "SESSION ID":
                 df.rename(columns={session_col: "SESSION ID"}, inplace=True)
 
-            # ------------------------------------------------------------------
-            # Hierarchy / filter columns (all optional)
-            # Only ingested when present — absence is handled gracefully by
-            # the has_hierarchy detection in the app sidebar.
-            #
-            # DB column       internal name    filter label
-            # SUPPLIER_NAME → supplier_name    Supplier
-            # PART_ID       → part_id          Part
-            # PART_NAME     → part_name        (display alongside part_id)
-            # TOOLING_TYPE  → tooling_type     Tooling Type
-            # PROJECT /
-            #  PROJECT_ID   → project_id       Project (if present)
-            # ------------------------------------------------------------------
             supplier_col = get_col("SUPPLIER_NAME", "SUPPLIER NAME", "SUPPLIER")
             if supplier_col and supplier_col != "supplier_name":
                 df.rename(columns={supplier_col: "supplier_name"}, inplace=True)
@@ -268,10 +208,6 @@ def load_all_data(files, _cache_version=None):
 def _get_stable_mode(series: pd.Series) -> float:
     """
     Computes the statistical mode of a cycle time series.
-
-    Rounds to 2 decimal places before mode selection to collapse floating-point
-    representation noise (e.g. 23.09999 and 23.10001 treated as identical).
-    This is the single authoritative mode function used everywhere in the module.
     """
     if series.empty:
         return 0.0
@@ -283,17 +219,19 @@ def _get_stable_mode(series: pd.Series) -> float:
 class RunRateCalculator:
     """
     Handles all core metric calculations.
-    Isolates by Tool ID and mirrors Spreadsheet / Capacity Risk App logic.
     """
 
     def __init__(self, df: pd.DataFrame, tolerance: float,
                  downtime_gap_tolerance: float, analysis_mode: str = 'aggregate',
-                 run_interval_hours: float = 8):
+                 run_interval_hours: float = 8, startup_stop_threshold_minutes: float = 5.0,
+                 startup_shot_count: int = 5):
         self.df_raw = df.copy()
         self.tolerance = tolerance
         self.downtime_gap_tolerance = downtime_gap_tolerance
         self.analysis_mode = analysis_mode
         self.run_interval_hours = run_interval_hours
+        self.startup_stop_threshold_minutes = startup_stop_threshold_minutes
+        self.startup_shot_count = startup_shot_count
         self.results = self._calculate_all_metrics()
 
     # ------------------------------------------------------------------
@@ -301,7 +239,6 @@ class RunRateCalculator:
     # ------------------------------------------------------------------
 
     def _calculate_hourly_summary(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Generates an hourly summary for the 'Daily' view."""
         if df.empty or 'stop_event' not in df.columns:
             return pd.DataFrame()
 
@@ -315,16 +252,26 @@ class RunRateCalculator:
         )
         uptime_min = df[df['stop_flag'] == 0].groupby('hour')['ACTUAL CT'].sum() / 60
         shots = hourly_groups.size().rename('total_shots')
+        
+        # Start-up shot logic added to hourly tracking
+        if 'startup_flag' in df.columns:
+            startups = df[df['startup_flag'] == 1].groupby('hour').size().rename('startup_shots')
+        else:
+            startups = pd.Series(0, index=hourly_groups.indices.keys(), name='startup_shots')
 
         hourly_summary = pd.DataFrame(index=range(24))
         hourly_summary['hour'] = hourly_summary.index
         hourly_summary = (hourly_summary
                           .join(stops.rename('stops'))
                           .join(shots)
+                          .join(startups)
                           .join(uptime_min.rename('uptime_min'))
                           .fillna(0)
                           .join(hourly_total_downtime_sec.rename('total_downtime_sec'))
                           .fillna(0))
+
+        # Normal shots = Total - Stops - Startups
+        hourly_summary['normal_shots'] = hourly_summary['total_shots'] - hourly_summary['stops'] - hourly_summary['startup_shots']
 
         hourly_summary['mttr_min'] = ((hourly_summary['total_downtime_sec'] / 60)
                                       / hourly_summary['stops'].replace(0, np.nan))
@@ -342,7 +289,6 @@ class RunRateCalculator:
             hourly_summary['total_shots'] == 0, np.nan, hourly_summary['stability_index']
         )
 
-        # Mode CT per hour — use _get_stable_mode for consistency
         if 'approved_ct' in df.columns:
             hourly_approved = hourly_groups['approved_ct'].apply(
                 lambda x: x.mode().iloc[0] if not x.mode().empty else np.nan
@@ -364,14 +310,10 @@ class RunRateCalculator:
     # ------------------------------------------------------------------
 
     def _calculate_all_metrics(self) -> dict:
-        """
-        Main calculation function. Mathematically mirrors spreadsheet block logic.
-        """
         df = self.df_raw.copy()
         if df.empty or "shot_time" not in df.columns:
             return {}
 
-        # 1. Base prep — deterministic sort (Tool → Time → CT)
         if 'ACTUAL CT' not in df.columns:
             df['ACTUAL CT'] = np.nan
         df['ACTUAL CT'] = pd.to_numeric(df['ACTUAL CT'], errors='coerce')
@@ -381,17 +323,14 @@ class RunRateCalculator:
         if df.empty:
             return {}
 
-        # 2. Time differences, guarded per tool
         df['time_diff_sec'] = (df.groupby('tool_id')['shot_time']
                                .diff().dt.total_seconds().fillna(0))
         mask_first_shot = df['tool_id'] != df['tool_id'].shift(1)
         df.loc[mask_first_shot, 'time_diff_sec'] = df.loc[mask_first_shot, 'ACTUAL CT']
 
-        # 3. Run grouping
         is_new_run = df['time_diff_sec'] > (self.run_interval_hours * 3600)
         df['run_id'] = (is_new_run | mask_first_shot).cumsum()
 
-        # 4. Mode CT per run — rounded for float stability (FIX: single authoritative source)
         run_modes = (df[df['ACTUAL CT'] < 1000]
                      .groupby('run_id')['ACTUAL CT']
                      .apply(_get_stable_mode))
@@ -401,13 +340,11 @@ class RunRateCalculator:
         df['lower_limit'] = df['mode_ct'] * (1 - self.tolerance)
         df['upper_limit'] = df['mode_ct'] * (1 + self.tolerance)
 
-        # Display value — single value if all runs share one mode, else "Varies by Run"
         modes_unique = df['mode_ct'].dropna().unique()
         mode_ct_display = (float(modes_unique[0])
                            if len(modes_unique) == 1
                            else "Varies by Run")
 
-        # Approved CT display
         approved_ct_display = np.nan
         if 'approved_ct' in df.columns:
             valid_app = df['approved_ct'].dropna()
@@ -416,7 +353,6 @@ class RunRateCalculator:
                                        if not valid_app.mode().empty
                                        else valid_app.mean())
 
-        # 5. Stop detection
         df['next_shot_time_diff'] = df.groupby('tool_id')['time_diff_sec'].shift(-1).fillna(0)
         is_time_gap = df['next_shot_time_diff'] > (df['ACTUAL CT'] + self.downtime_gap_tolerance)
         is_abnormal = (df['ACTUAL CT'] < df['lower_limit']) | (df['ACTUAL CT'] > df['upper_limit'])
@@ -426,10 +362,16 @@ class RunRateCalculator:
         df['prev_stop_flag'] = df.groupby('tool_id')['stop_flag'].shift(1, fill_value=0)
         df['stop_event'] = (df['stop_flag'] == 1) & (df['prev_stop_flag'] == 0)
 
+        if self.startup_shot_count > 0:
+            trigger = df['time_diff_sec'] >= (self.startup_stop_threshold_minutes * 60)
+            roll_sum = trigger.groupby(df['tool_id']).transform(lambda x: x.rolling(window=self.startup_shot_count, min_periods=1).sum())
+            df['startup_flag'] = np.where((roll_sum > 0) & (df['stop_flag'] == 0), 1, 0)
+        else:
+            df['startup_flag'] = 0
+
         df['adj_ct_sec'] = df['ACTUAL CT']
         df.loc[is_time_gap, 'adj_ct_sec'] = df['next_shot_time_diff']
 
-        # 6. Run-exact time summation
         run_durations_sec = []
         for _, run_df in df.groupby('run_id'):
             if not run_df.empty:
@@ -445,7 +387,8 @@ class RunRateCalculator:
 
         total_shots = len(df)
         stop_events = df['stop_event'].sum()
-        normal_shots = len(prod_df)
+        startup_shots = df['startup_flag'].sum() if 'startup_flag' in df.columns else 0
+        normal_shots = len(prod_df) - startup_shots
 
         mttr_min = (downtime_sec / 60 / stop_events) if stop_events > 0 else 0
         mtbf_min = ((production_time_sec / 60 / stop_events)
@@ -453,8 +396,10 @@ class RunRateCalculator:
                     else (production_time_sec / 60))
         stability_index = ((production_time_sec / total_runtime_sec * 100)
                            if total_runtime_sec > 0 else 100.0)
+        
+        # Calculate efficiency stringently using only normal shots 
         efficiency = (normal_shots / total_shots) if total_shots > 0 else 0
-        avg_cycle_time_sec = production_time_sec / normal_shots if normal_shots > 0 else 0
+        avg_cycle_time_sec = production_time_sec / len(prod_df) if len(prod_df) > 0 else 0
 
         first_stop_event_index = df[df['stop_event'] == True].index.min()
         if pd.isna(first_stop_event_index):
@@ -464,7 +409,6 @@ class RunRateCalculator:
         else:
             time_to_first_dt_sec = df.loc[:first_stop_event_index - 1, 'adj_ct_sec'].sum()
 
-        # 7. Time bucket analysis (stable run segments)
         df["run_group"] = df["stop_event"].cumsum()
         df_for_runs = df[df['adj_ct_sec'] <= 28800].copy()
         run_durations = (df_for_runs[df_for_runs["stop_flag"] == 0]
@@ -487,7 +431,7 @@ class RunRateCalculator:
                 labels=labels, right=False, include_lowest=True
             )
 
-        reds = px.colors.sequential.Reds[3:7][::-1]  # reversed: darkest = 0-20 (worst)
+        reds = px.colors.sequential.Reds[3:7][::-1] 
         blues = px.colors.sequential.Blues[3:8]
         greens = px.colors.sequential.Greens[3:8]
         red_labels, blue_labels, green_labels = [], [], []
@@ -520,6 +464,7 @@ class RunRateCalculator:
             "efficiency": efficiency,
             "stop_events": stop_events,
             "normal_shots": normal_shots,
+            "startup_shots": startup_shots,
             "mttr_min": mttr_min,
             "mtbf_min": mtbf_min,
             "stability_index": stability_index,
@@ -555,11 +500,6 @@ class RunRateCalculator:
 # ==============================================================================
 
 def _run_metrics_from_processed(df_slice: pd.DataFrame) -> dict:
-    """
-    Computes standard block metrics from an already-processed (flagged) DataFrame slice.
-    Centralises the repeated start/end/duration/prod/down pattern used across all
-    summary functions, ensuring identical arithmetic everywhere.
-    """
     if df_slice.empty:
         return {}
     start = df_slice['shot_time'].min()
@@ -572,12 +512,10 @@ def _run_metrics_from_processed(df_slice: pd.DataFrame) -> dict:
     down_sec = max(0, duration - prod_sec)
     tot_stops = df_slice['stop_event'].sum()
     tot_shots = len(df_slice)
-    normal_shots = len(prod_df)
+    
+    startup_shots = df_slice['startup_flag'].sum() if 'startup_flag' in df_slice.columns else 0
+    normal_shots = len(prod_df) - startup_shots
 
-    # Read mode_ct from the pre-computed column set by the global processing pass.
-    # This ensures the run breakdown table always shows the same mode_ct as the
-    # dashboard — both derived from the full dataset, not the day/week slice.
-    # Fall back to recalculating only if the column is absent (non-pre-processed path).
     if 'mode_ct' in df_slice.columns and not df_slice['mode_ct'].dropna().empty:
         mode_ct = float(df_slice['mode_ct'].iloc[0])
     else:
@@ -595,6 +533,7 @@ def _run_metrics_from_processed(df_slice: pd.DataFrame) -> dict:
         'tot_stops': tot_stops,
         'tot_shots': tot_shots,
         'normal_shots': normal_shots,
+        'startup_shots': startup_shots,
         'mode_ct': mode_ct,
         'approved_ct': approved_ct,
         'stability_index': (prod_sec / duration * 100) if duration > 0 else 100.0,
@@ -605,14 +544,11 @@ def _run_metrics_from_processed(df_slice: pd.DataFrame) -> dict:
 
 
 def calculate_daily_summaries_for_week(df_week, tolerance, downtime_gap_tolerance,
-                                       analysis_mode, run_interval_hours=8):
-    """
-    Rolls up daily metrics for the Weekly view.
-    Re-processes the full week slice to respect the current tolerance sliders,
-    then aggregates per-day from the flagged output.
-    """
+                                       analysis_mode, run_interval_hours=8,
+                                       startup_stop_threshold_minutes=5.0, startup_shot_count=5):
     calc_global = RunRateCalculator(df_week, tolerance, downtime_gap_tolerance,
-                                    analysis_mode, run_interval_hours)
+                                    analysis_mode, run_interval_hours,
+                                    startup_stop_threshold_minutes, startup_shot_count)
     df_proc = calc_global.results.get('processed_df', df_week)
     if df_proc.empty:
         return pd.DataFrame()
@@ -632,28 +568,27 @@ def calculate_daily_summaries_for_week(df_week, tolerance, downtime_gap_toleranc
             'mtbf_min': m['mtbf_min'],
             'stops': m['tot_stops'],
             'total_shots': m['tot_shots'],
+            'normal_shots': m['normal_shots'],
+            'startup_shots': m['startup_shots'],
             'total_downtime_sec': m['down_sec'],
             'uptime_min': m['prod_sec'] / 60,
-            'mode_ct': m['mode_ct'],       # FIX: computed, not iloc[0]
+            'mode_ct': m['mode_ct'],
             'approved_ct': m['approved_ct'],
         })
     return pd.DataFrame(daily_results_list)
 
 
 def calculate_weekly_summaries_for_month(df_month, tolerance, downtime_gap_tolerance,
-                                         analysis_mode, run_interval_hours=8):
-    """
-    Rolls up weekly metrics for the Monthly view.
-    Re-processes the full month slice to respect the current tolerance sliders.
-    """
+                                         analysis_mode, run_interval_hours=8,
+                                         startup_stop_threshold_minutes=5.0, startup_shot_count=5):
     calc_global = RunRateCalculator(df_month, tolerance, downtime_gap_tolerance,
-                                    analysis_mode, run_interval_hours)
+                                    analysis_mode, run_interval_hours,
+                                    startup_stop_threshold_minutes, startup_shot_count)
     df_proc = calc_global.results.get('processed_df', df_month)
     if df_proc.empty:
         return pd.DataFrame()
 
     df_proc = df_proc.copy()
-    # Use year+week key to prevent W52 2024 and W52 2025 merging at year boundary
     iso = df_proc['shot_time'].dt.isocalendar()
     df_proc['week_lbl'] = iso['year'].astype(str) + '-W' + iso['week'].astype(str).str.zfill(2)
 
@@ -669,27 +604,20 @@ def calculate_weekly_summaries_for_month(df_month, tolerance, downtime_gap_toler
             'mtbf_min': m['mtbf_min'],
             'stops': m['tot_stops'],
             'total_shots': m['tot_shots'],
+            'normal_shots': m['normal_shots'],
+            'startup_shots': m['startup_shots'],
             'total_downtime_sec': m['down_sec'],
             'uptime_min': m['prod_sec'] / 60,
-            'mode_ct': m['mode_ct'],       # FIX: computed, not iloc[0]
+            'mode_ct': m['mode_ct'],
             'approved_ct': m['approved_ct'],
         })
     return pd.DataFrame(weekly_results_list)
 
 
 def build_display_results(df: pd.DataFrame, run_interval_hours: float = 8) -> dict:
-    """
-    Builds the rendering results dict from an already-processed DataFrame.
-
-    Called by render_dashboard when df_view is a slice of the globally-processed
-    df_processed. Because mode_ct, stop_flag, lower_limit, upper_limit and
-    run_group are already set from the full-dataset pass, this avoids the
-    day-slice re-computation that shifts the tolerance band and misclassifies shots.
-    """
     if df.empty:
         return {}
 
-    # --- run_durations for bucket analysis ---
     col = 'adj_ct_sec' if 'adj_ct_sec' in df.columns else 'ACTUAL CT'
     df_for_runs = df[df[col] <= 28800].copy()
     run_durations = (
@@ -714,7 +642,7 @@ def build_display_results(df: pd.DataFrame, run_interval_hours: float = 8) -> di
             labels=labels, right=False, include_lowest=True
         )
 
-    reds = px.colors.sequential.Reds[3:7][::-1]  # reversed: darkest = 0-20 (worst)
+    reds = px.colors.sequential.Reds[3:7][::-1] 
     blues = px.colors.sequential.Blues[3:8]
     greens = px.colors.sequential.Greens[3:8]
     red_labels, blue_labels, green_labels = [], [], []
@@ -738,7 +666,6 @@ def build_display_results(df: pd.DataFrame, run_interval_hours: float = 8) -> di
     for i, label in enumerate(green_labels):
         bucket_color_map[label] = greens[i % len(greens)]
 
-    # --- mode_ct and limit display values from pre-computed columns ---
     modes_unique = df['mode_ct'].dropna().unique() if 'mode_ct' in df.columns else np.array([])
     if len(modes_unique) == 1:
         mode_ct_display = float(modes_unique[0])
@@ -750,9 +677,6 @@ def build_display_results(df: pd.DataFrame, run_interval_hours: float = 8) -> di
     lower_limit = df['lower_limit'].min() if 'lower_limit' in df.columns else 0
     upper_limit = df['upper_limit'].max() if 'upper_limit' in df.columns else 0
 
-    # --- hourly summary ---
-    # Use a temporary RunRateCalculator instance solely to call _calculate_hourly_summary,
-    # passing in the already-processed df so no recalculation occurs.
     temp = object.__new__(RunRateCalculator)
     hourly_summary = temp._calculate_hourly_summary(df)
 
@@ -769,25 +693,14 @@ def build_display_results(df: pd.DataFrame, run_interval_hours: float = 8) -> di
 
 
 def calculate_run_summaries(df_period, tolerance, downtime_gap_tolerance,
-                            run_interval_hours=8, pre_processed=False):
-    """
-    Calculates metrics for each grouped run within the period.
-
-    When pre_processed=True the input df already has stop_flag, stop_event,
-    mode_ct, lower_limit and upper_limit set from a global processing pass
-    (i.e. it is a slice of df_processed from get_processed_data).  In that
-    case the internal RunRateCalculator call is skipped entirely, which
-    prevents the day/week slice from recomputing mode_ct from its own subset
-    of shots and shifting the tolerance band.
-
-    When pre_processed=False (default) the function behaves as before,
-    calling RunRateCalculator on the raw input.
-    """
+                            run_interval_hours=8, pre_processed=False,
+                            startup_stop_threshold_minutes=5.0, startup_shot_count=5):
     if pre_processed and 'stop_flag' in df_period.columns:
         df_proc = df_period
     else:
         calc_base = RunRateCalculator(df_period, tolerance, downtime_gap_tolerance,
-                                      'aggregate', run_interval_hours)
+                                      'aggregate', run_interval_hours,
+                                      startup_stop_threshold_minutes, startup_shot_count)
         df_proc = calc_base.results.get('processed_df', df_period)
 
     run_summary_list = []
@@ -796,7 +709,6 @@ def calculate_run_summaries(df_period, tolerance, downtime_gap_tolerance,
             continue
         m = _run_metrics_from_processed(df_run)
 
-        # Per-run limits from the pre-computed columns (set during mode_ct assignment)
         lower_limit = df_run['lower_limit'].iloc[0] if 'lower_limit' in df_run.columns else 0
         upper_limit = df_run['upper_limit'].iloc[0] if 'upper_limit' in df_run.columns else 0
 
@@ -807,8 +719,9 @@ def calculate_run_summaries(df_period, tolerance, downtime_gap_tolerance,
             'end_time': m['end'],
             'total_shots': m['tot_shots'],
             'normal_shots': m['normal_shots'],
-            'stopped_shots': m['tot_shots'] - m['normal_shots'],
-            'mode_ct': m['mode_ct'],       # FIX: computed via _get_stable_mode
+            'startup_shots': m['startup_shots'],
+            'stopped_shots': m['tot_shots'] - m['normal_shots'] - m['startup_shots'],
+            'mode_ct': m['mode_ct'], 
             'lower_limit': lower_limit,
             'upper_limit': upper_limit,
             'total_runtime_sec': m['duration'],
@@ -870,7 +783,16 @@ def plot_shot_bar_chart(df, lower_limit, upper_limit, mode_ct,
         st.info("No shot data to display for this period.")
         return
     df = df.copy()
-    df['color'] = np.where(df['stop_flag'] == 1, PASTEL_COLORS['red'], '#3498DB')
+
+    conditions = [
+        df['stop_flag'] == 1,
+        df.get('startup_flag', 0) == 1
+    ]
+    choices = [
+        PASTEL_COLORS['red'],
+        '#9b59b6'  # Purple for start-up shots
+    ]
+    df['color'] = np.select(conditions, choices, default='#3498DB')
 
     downtime_gap_indices = df[df['adj_ct_sec'] != df['ACTUAL CT']].index
     valid_downtime_gap_indices = downtime_gap_indices[downtime_gap_indices > 0]
@@ -887,8 +809,6 @@ def plot_shot_bar_chart(df, lower_limit, upper_limit, mode_ct,
         prev_shot_timestamps = df['shot_time'].shift(1).loc[valid_downtime_gap_indices]
         df.loc[valid_downtime_gap_indices, 'plot_time'] = prev_shot_timestamps
 
-    # #7 fix: use the actual first index rather than hardcoded 0,
-    # which fails when df is a slice with a non-zero-based index
     _first_idx = df.index[0]
     if pd.isna(df.loc[_first_idx, 'plot_time']) if 'plot_time' in df.columns else True:
         df.loc[_first_idx, 'plot_time'] = df.loc[_first_idx, 'shot_time']
@@ -900,6 +820,8 @@ def plot_shot_bar_chart(df, lower_limit, upper_limit, mode_ct,
     ))
     fig.add_trace(go.Bar(x=[None], y=[None], name="Normal Shot",
                          marker_color='#3498DB', showlegend=True))
+    fig.add_trace(go.Bar(x=[None], y=[None], name="Start-up Shot",
+                         marker_color='#9b59b6', showlegend=True))
     fig.add_trace(go.Bar(x=[None], y=[None], name="Stopped Shot",
                          marker_color=PASTEL_COLORS['red'], showlegend=True))
     fig.add_trace(go.Scatter(
@@ -1329,19 +1251,19 @@ def generate_mttr_mtbf_analysis(analysis_df, analysis_level):
 # ==============================================================================
 
 def prepare_and_generate_run_based_excel(df_for_export, tolerance, downtime_gap_tolerance,
-                                          run_interval_hours, tool_id_selection):
+                                          run_interval_hours, tool_id_selection,
+                                          startup_stop_threshold_minutes=5.0, startup_shot_count=5):
     """Generates the run-based Excel report using the full calculation engine."""
     try:
         base_calc = RunRateCalculator(df_for_export, tolerance, downtime_gap_tolerance,
-                                      'aggregate', run_interval_hours)
+                                      'aggregate', run_interval_hours,
+                                      startup_stop_threshold_minutes, startup_shot_count)
         df_processed = base_calc.results.get("processed_df", pd.DataFrame())
 
         if df_processed.empty or 'run_id' not in df_processed.columns:
             st.error("Processing failed for Excel export.")
             return BytesIO().getvalue()
 
-        # Apply the same CRCG run-start reset used in get_processed_data()
-        # so that stop_flag assignments in the Excel file match the dashboard display.
         mask_first = df_processed['tool_id'] != df_processed['tool_id'].shift(1)
         is_new_run = df_processed['time_diff_sec'] > (run_interval_hours * 3600)
         df_processed.loc[mask_first | is_new_run, 'stop_flag'] = 0
@@ -1357,7 +1279,7 @@ def prepare_and_generate_run_based_excel(df_for_export, tolerance, downtime_gap_
         desired_columns_base = [
             'SUPPLIER_NAME', 'tool_id', 'SESSION ID', 'shot_time',
             'APPROVED_CT', 'approved_ct', 'ACTUAL CT',
-            'time_diff_sec', 'stop_flag', 'stop_event', 'run_group'
+            'time_diff_sec', 'stop_flag', 'startup_flag', 'stop_event', 'run_group'
         ]
         formula_columns = ['CUMULATIVE COUNT', 'RUN DURATION', 'TIME BUCKET']
 
@@ -1374,7 +1296,7 @@ def prepare_and_generate_run_based_excel(df_for_export, tolerance, downtime_gap_
                                        else tool_id_selection),
                     'start_time': m['start'],
                     'end_time': m['end'],
-                    'mode_ct': m['mode_ct'],          # FIX: computed, not iloc[0]
+                    'mode_ct': m['mode_ct'],          
                     'lower_limit': (df_run_raw['lower_limit'].iloc[0]
                                     if 'lower_limit' in df_run_raw.columns else 0),
                     'upper_limit': (df_run_raw['upper_limit'].iloc[0]
@@ -1426,6 +1348,7 @@ def prepare_and_generate_run_based_excel(df_for_export, tolerance, downtime_gap_
                         'shot_time': 'LOCAL_SHOT_TIME',
                         'time_diff_sec': 'TIME DIFF SEC',
                         'stop_flag': 'STOP',
+                        'startup_flag': 'STARTUP SHOT',
                         'stop_event': 'STOP EVENT'
                     }
                 )
@@ -1433,7 +1356,7 @@ def prepare_and_generate_run_based_excel(df_for_export, tolerance, downtime_gap_
                 final_desired_renamed = [
                     'SUPPLIER_NAME', 'EQUIPMENT_CODE', 'SESSION ID', 'Shot Sequence',
                     'LOCAL_SHOT_TIME', 'APPROVED_CT', 'approved_ct', 'ACTUAL CT',
-                    'TIME DIFF SEC', 'STOP', 'STOP EVENT', 'run_group',
+                    'TIME DIFF SEC', 'STOP', 'STARTUP SHOT', 'STOP EVENT', 'run_group',
                     'CUMULATIVE COUNT', 'RUN DURATION', 'TIME BUCKET'
                 ]
                 for col in final_desired_renamed:
@@ -1643,7 +1566,7 @@ def generate_excel_report(all_runs_data, tolerance):
                         continue
 
                     cell_format = data_format
-                    if col_name == 'STOP':
+                    if col_name in ['STOP', 'STARTUP SHOT']:
                         ws.write_number(current_row_excel_idx, c_idx,
                                         int(value) if pd.notna(value) else 0, cell_format)
                     elif col_name == 'STOP EVENT':
@@ -1755,7 +1678,8 @@ def generate_excel_report(all_runs_data, tolerance):
 # --- 6. RISK ANALYSIS MODULE ---
 # ==============================================================================
 
-def calculate_risk_scores(df_all, run_interval_hours=8, min_shots_filter=1, tolerance=0.05, downtime_gap_tolerance=2.0):
+def calculate_risk_scores(df_all, run_interval_hours=8, min_shots_filter=1, tolerance=0.05,
+                          downtime_gap_tolerance=2.0, startup_stop_threshold_minutes=5.0, startup_shot_count=5):
     """Calculates Risk Scores based on isolated block metrics per tool."""
     if df_all.empty or 'tool_id' not in df_all.columns:
         return pd.DataFrame()
@@ -1773,13 +1697,15 @@ def calculate_risk_scores(df_all, run_interval_hours=8, min_shots_filter=1, tole
         if df_period.empty:
             continue
 
-        calc = RunRateCalculator(df_period, tolerance, downtime_gap_tolerance, 'aggregate', run_interval_hours)
+        calc = RunRateCalculator(df_period, tolerance, downtime_gap_tolerance, 'aggregate', run_interval_hours,
+                                 startup_stop_threshold_minutes, startup_shot_count)
         res = calc.results
         df_processed = res.get('processed_df')
         if df_processed is None or df_processed.empty:
             continue
 
-        run_summary_df = calculate_run_summaries(df_processed, tolerance, downtime_gap_tolerance, run_interval_hours, pre_processed=True)
+        run_summary_df = calculate_run_summaries(df_processed, tolerance, downtime_gap_tolerance, run_interval_hours, pre_processed=True,
+                                                 startup_stop_threshold_minutes=startup_stop_threshold_minutes, startup_shot_count=startup_shot_count)
         if run_summary_df.empty:
             continue
 
@@ -1799,9 +1725,6 @@ def calculate_risk_scores(df_all, run_interval_hours=8, min_shots_filter=1, tole
         res_mtbf = ((production_time_sec / 60 / stop_events)
                     if stop_events > 0 else (production_time_sec / 60))
 
-        # Weekly breakdown for trend detection
-        # Group by (year, week) not just week alone to avoid merging the same
-        # week number across different years when data spans > 52 weeks.
         weekly_stats = []
         df_processed = df_processed.copy()
         iso = df_processed['shot_time'].dt.isocalendar()
@@ -1817,7 +1740,8 @@ def calculate_risk_scores(df_all, run_interval_hours=8, min_shots_filter=1, tole
 
         for _, week_key, df_week in sorted_weeks:
             weekly_run_summary = calculate_run_summaries(df_week.copy(), tolerance, downtime_gap_tolerance,
-                                                          run_interval_hours, pre_processed=True)
+                                                          run_interval_hours, pre_processed=True,
+                                                          startup_stop_threshold_minutes=startup_stop_threshold_minutes, startup_shot_count=startup_shot_count)
             if not weekly_run_summary.empty:
                 if 'total_shots' in weekly_run_summary.columns:
                     weekly_run_summary = weekly_run_summary[
@@ -1910,19 +1834,12 @@ def calculate_risk_scores(df_all, run_interval_hours=8, min_shots_filter=1, tole
 def generate_weekly_comparison_pptx(df_weekly: pd.DataFrame, tool_id: str) -> bytes:
     """
     Generates a PowerPoint weekly comparison report from the trends DataFrame.
-
-    df_weekly must contain the columns produced by render_trends_tab:
-        Week, Stability Index (%), Efficiency (%), MTTR (min), MTBF (min),
-        Total Shots, Normal Shots, Stop Events, Production Time (h), Downtime (h)
-
-    Returns raw bytes of the .pptx file ready for st.download_button.
     """
     from pptx import Presentation
     from pptx.util import Inches, Pt
     from pptx.dml.color import RGBColor
     from pptx.enum.text import PP_ALIGN
 
-    # ------------------------------------------------------------------ helpers
     def rgb(hex_str):
         h = hex_str.lstrip('#')
         return RGBColor(int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
@@ -1936,7 +1853,6 @@ def generate_weekly_comparison_pptx(df_weekly: pd.DataFrame, tool_id: str) -> by
             return str(val)
 
     def _delta_str(curr, prev, higher_is_better=True):
-        """Returns e.g. '{+2.1%}' and a colour hex."""
         try:
             if pd.isna(prev) or prev == 0:
                 return "", None
@@ -1944,13 +1860,11 @@ def generate_weekly_comparison_pptx(df_weekly: pd.DataFrame, tool_id: str) -> by
             sign = "+" if pct >= 0 else ""
             label = f"{{{sign}{pct:.1f}%}}"
             good  = pct >= 0 if higher_is_better else pct <= 0
-            color = "2E7D32" if good else "C62828"   # dark green / dark red
+            color = "2E7D32" if good else "C62828"   
             return label, color
         except Exception:
             return "", None
 
-    # Metric definitions:
-    # (row label, df column, format string, higher_is_better)
     METRICS = [
         ("Stability Index",     "Stability Index (%)",  "{:.1f}%",  True),
         ("Run Rate Efficiency", "Efficiency (%)",        "{:.1f}%",  True),
@@ -1959,35 +1873,32 @@ def generate_weekly_comparison_pptx(df_weekly: pd.DataFrame, tool_id: str) -> by
         ("Production Time",     "Production Time (h)",  "{:.1f} h",  True),
         ("Total Shots",         "Total Shots",           "{:,.0f}",   True),
         ("Normal Shots",        "Normal Shots",          "{:,.0f}",   True),
+        ("Start-up Shots",      "Start-up Shots",        "{:,.0f}",   True),
         ("Stop Events",         "Stop Events",           "{:.0f}",    False),
     ]
 
-    # ------------------------------------------------------------------ data
     df = df_weekly.reset_index(drop=True)
     periods = df["Week"].tolist()
     n_weeks = len(periods)
 
-    # Totals / averages column
     totals = {}
     for _, col, fmt, _ in METRICS:
         if col not in df.columns:
             totals[col] = None
             continue
-        if col in ("Total Shots", "Normal Shots", "Stop Events"):
+        if col in ("Total Shots", "Normal Shots", "Start-up Shots", "Stop Events"):
             totals[col] = df[col].sum()
         else:
             totals[col] = df[col].mean()
 
-    # ------------------------------------------------------------------ slide
     prs = Presentation()
     prs.slide_width  = Inches(13.33)
     prs.slide_height = Inches(7.5)
 
-    slide = prs.slides.add_slide(prs.slide_layouts[6])  # blank
+    slide = prs.slides.add_slide(prs.slide_layouts[6]) 
     slide.background.fill.solid()
     slide.background.fill.fore_color.rgb = rgb("F4F6F9")
 
-    # ── Title bar ──────────────────────────────────────────────────────────────
     from pptx.util import Inches, Pt, Emu
     title_box = slide.shapes.add_textbox(Inches(0.3), Inches(0.18), Inches(12.7), Inches(0.7))
     tf = title_box.text_frame
@@ -2001,48 +1912,43 @@ def generate_weekly_comparison_pptx(df_weekly: pd.DataFrame, tool_id: str) -> by
     run.font.name  = "Calibri"
     p.alignment = PP_ALIGN.LEFT
 
-    # Thin accent line under title
     from pptx.util import Emu
     line = slide.shapes.add_shape(
-        1,  # MSO_SHAPE_TYPE.RECTANGLE
+        1, 
         Inches(0.3), Inches(0.92), Inches(12.7), Pt(2)
     )
     line.fill.solid(); line.fill.fore_color.rgb = rgb("002060")
     line.line.fill.background()
 
-    # ── Table geometry ─────────────────────────────────────────────────────────
     left   = Inches(0.3)
     top    = Inches(1.05)
     width  = Inches(12.7)
     height = Inches(5.7)
 
-    n_cols   = 1 + n_weeks + 1   # KPI label + one per week + Total
-    n_rows   = 1 + len(METRICS)  # header row + metric rows
+    n_cols   = 1 + n_weeks + 1   
+    n_rows   = 1 + len(METRICS)  
 
     tbl = slide.shapes.add_table(n_rows, n_cols, left, top, width, height).table
 
-    # Column widths: KPI label wider, rest equal
     kpi_w    = Inches(1.9)
     data_w   = (Inches(12.7) - kpi_w) / (n_cols - 1)
     tbl.columns[0].width = kpi_w
     for c in range(1, n_cols):
         tbl.columns[c].width = int(data_w)
 
-    # Row heights: header a touch taller
     hdr_h  = Inches(0.52)
     row_h  = (Inches(5.7) - hdr_h) / len(METRICS)
     tbl.rows[0].height = int(hdr_h)
     for r in range(1, n_rows):
         tbl.rows[r].height = int(row_h)
 
-    # ── Colours ────────────────────────────────────────────────────────────────
     HDR_BG   = rgb("002060")
     HDR_FG   = rgb("FFFFFF")
-    ALT_BG   = rgb("EEF2F7")   # alternating row bg
+    ALT_BG   = rgb("EEF2F7")   
     NORM_BG  = rgb("FFFFFF")
     KPI_FG   = rgb("1A237E")
     VAL_FG   = rgb("212121")
-    TOT_BG   = rgb("D9E1F2")   # total column background
+    TOT_BG   = rgb("D9E1F2")   
     TOT_FG   = rgb("002060")
 
     def _cell_set(cell, text, fg, bg, bold=False, size=10,
@@ -2053,7 +1959,6 @@ def generate_weekly_comparison_pptx(df_weekly: pd.DataFrame, tool_id: str) -> by
         tf2.word_wrap = True
         p2 = tf2.paragraphs[0]
         p2.alignment = align
-        # Clear any existing runs
         for run2 in p2.runs:
             run2.text = ""
         if p2.runs:
@@ -2069,14 +1974,12 @@ def generate_weekly_comparison_pptx(df_weekly: pd.DataFrame, tool_id: str) -> by
 
     def _cell_rich(cell, main_text, delta_text, delta_color_hex,
                    bg, main_fg, main_size=10, bold=False):
-        """Cell with main value and a smaller coloured delta on the same line."""
         cell.fill.solid()
         cell.fill.fore_color.rgb = bg
         tf2 = cell.text_frame
         tf2.word_wrap = False
         p2 = tf2.paragraphs[0]
         p2.alignment = PP_ALIGN.CENTER
-        # Clear existing
         for _ in list(p2.runs):
             pass
         r_main = p2.add_run()
@@ -2093,7 +1996,6 @@ def generate_weekly_comparison_pptx(df_weekly: pd.DataFrame, tool_id: str) -> by
             r_delta.font.color.rgb = rgb(delta_color_hex)
             r_delta.font.name  = "Calibri"
 
-    # ── Header row ─────────────────────────────────────────────────────────────
     _cell_set(tbl.cell(0, 0), "KPI", HDR_FG, HDR_BG, bold=True, size=11,
               align=PP_ALIGN.LEFT)
     for wi, period in enumerate(periods):
@@ -2102,16 +2004,13 @@ def generate_weekly_comparison_pptx(df_weekly: pd.DataFrame, tool_id: str) -> by
     _cell_set(tbl.cell(0, n_cols - 1), "Total / Avg", HDR_FG, HDR_BG,
               bold=True, size=11)
 
-    # ── Data rows ──────────────────────────────────────────────────────────────
     for ri, (label, col, fmt, hib) in enumerate(METRICS):
         row_idx = ri + 1
         row_bg  = ALT_BG if ri % 2 == 0 else NORM_BG
 
-        # KPI label
         _cell_set(tbl.cell(row_idx, 0), label, KPI_FG, row_bg,
                   bold=True, size=10, align=PP_ALIGN.LEFT)
 
-        # Week values with delta vs previous week
         for wi in range(n_weeks):
             curr_val = df.iloc[wi][col] if col in df.columns else None
             prev_val = df.iloc[wi - 1][col] if (wi > 0 and col in df.columns) else None
@@ -2129,27 +2028,24 @@ def generate_weekly_comparison_pptx(df_weekly: pd.DataFrame, tool_id: str) -> by
                 _cell_set(cell, val_str, VAL_FG, row_bg,
                           bold=(wi == 0), size=10)
 
-        # Total / avg column
         tot_val  = totals.get(col)
         tot_str  = _fmt(tot_val, fmt) if tot_val is not None else "—"
         _cell_set(tbl.cell(row_idx, n_cols - 1), tot_str, TOT_FG, TOT_BG,
                   bold=True, size=10)
 
-    # ── Footer note ────────────────────────────────────────────────────────────
     note_box = slide.shapes.add_textbox(
         Inches(0.3), Inches(6.85), Inches(12.7), Inches(0.4)
     )
     tf3 = note_box.text_frame
     p3  = tf3.paragraphs[0]
     r3  = p3.add_run()
-    r3.text  = f"Generated by Run Rate Analysis v3.50  |  Tool: {tool_id}  |  {pd.Timestamp.now().strftime('%d %b %Y')}"
+    r3.text  = f"Generated by Run Rate Analysis v3.60  |  Tool: {tool_id}  |  {pd.Timestamp.now().strftime('%d %b %Y')}"
     r3.font.size   = Pt(8)
     r3.font.italic = True
     r3.font.color.rgb = rgb("9E9E9E")
     r3.font.name   = "Calibri"
     p3.alignment = PP_ALIGN.LEFT
 
-    # ── Write to bytes ─────────────────────────────────────────────────────────
     buf = BytesIO()
     prs.save(buf)
     return buf.getvalue()
