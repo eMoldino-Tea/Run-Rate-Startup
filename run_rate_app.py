@@ -193,7 +193,9 @@ def render_trends_tab(df_tool, tolerance, downtime_gap_tolerance,
         stops = run_summaries['stops'].sum()
         total_shots = run_summaries['total_shots'].sum()
         normal_shots = run_summaries['normal_shots'].sum()
-        startup_shots = run_summaries.get('startup_shots', pd.Series(dtype=int)).sum()
+        normal_startups = run_summaries.get('normal_startup_shots', pd.Series(dtype=int)).sum()
+        slow_startups = run_summaries.get('slow_startup_shots', pd.Series(dtype=int)).sum()
+        failed_startups = run_summaries.get('failed_startup_shots', pd.Series(dtype=int)).sum()
 
         stability = (prod_time / total_runtime * 100) if total_runtime > 0 else 0
         efficiency = (normal_shots / total_shots * 100) if total_shots > 0 else 0
@@ -216,7 +218,9 @@ def render_trends_tab(df_tool, tolerance, downtime_gap_tolerance,
             'MTBF (min)': mtbf,
             'Total Shots': total_shots,
             'Normal Shots': normal_shots, 
-            'Start-up Shots': startup_shots,
+            'Normal Start-ups': normal_startups,
+            'Slow Start-ups': slow_startups,
+            'Failed Start-ups': failed_startups,
             'Stop Events': stops,
             'Production Time (h)': prod_time / 3600,
             'Downtime (h)': downtime / 3600,
@@ -234,7 +238,8 @@ def render_trends_tab(df_tool, tolerance, downtime_gap_tolerance,
         df_trends.style.format({
             'Stability Index (%)': '{:.1f}', 'Efficiency (%)': '{:.1f}',
             'MTTR (min)': '{:.1f}', 'MTBF (min)': '{:.1f}',
-            'Total Shots': '{:,.0f}', 'Normal Shots': '{:,.0f}', 'Start-up Shots': '{:,.0f}', 
+            'Total Shots': '{:,.0f}', 'Normal Shots': '{:,.0f}', 
+            'Normal Start-ups': '{:,.0f}', 'Slow Start-ups': '{:,.0f}', 'Failed Start-ups': '{:,.0f}', 
             'Stop Events': '{:,.0f}', 'Production Time (h)': '{:.1f}', 'Downtime (h)': '{:.1f}',
         }).background_gradient(subset=['Stability Index (%)'],
                                cmap='RdYlGn', vmin=0, vmax=100),
@@ -318,16 +323,6 @@ def render_dashboard(df_tool, tool_id_selection, tolerance, downtime_gap_toleran
         )
         df_processed = base_calc.results.get("processed_df", pd.DataFrame())
         if not df_processed.empty:
-            mask_first = df_processed['tool_id'] != df_processed['tool_id'].shift(1)
-            is_new_run = df_processed['time_diff_sec'] > (interval_hours * 3600)
-            df_processed.loc[mask_first | is_new_run, 'stop_flag'] = 0
-            df_processed['prev_stop_flag'] = (
-                df_processed.groupby('tool_id')['stop_flag'].shift(1, fill_value=0)
-            )
-            df_processed['stop_event'] = (
-                (df_processed['stop_flag'] == 1)
-                & (df_processed['prev_stop_flag'] == 0)
-            )
             df_processed['run_group'] = df_processed['stop_event'].cumsum()
             df_processed['week'] = df_processed['shot_time'].dt.isocalendar().week
             df_processed['year'] = df_processed['shot_time'].dt.isocalendar().year
@@ -519,7 +514,6 @@ def render_dashboard(df_tool, tool_id_selection, tolerance, downtime_gap_toleran
         downtime_sec = run_summary_df_for_totals['downtime_sec'].sum()
         total_shots = run_summary_df_for_totals['total_shots'].sum()
         normal_shots = run_summary_df_for_totals['normal_shots'].sum()
-        startup_shots = run_summary_df_for_totals.get('startup_shots', pd.Series(dtype=int)).sum()
         stop_events = run_summary_df_for_totals['stops'].sum()
 
         summary_metrics = {
@@ -528,8 +522,10 @@ def render_dashboard(df_tool, tool_id_selection, tolerance, downtime_gap_toleran
             'downtime_sec': downtime_sec,
             'total_shots': total_shots,
             'normal_shots': normal_shots,
-            'startup_shots': startup_shots,
             'stop_events': stop_events,
+            'normal_startup_shots': run_summary_df_for_totals.get('normal_startup_shots', pd.Series(dtype=int)).sum(),
+            'slow_startup_shots': run_summary_df_for_totals.get('slow_startup_shots', pd.Series(dtype=int)).sum(),
+            'failed_startup_shots': run_summary_df_for_totals.get('failed_startup_shots', pd.Series(dtype=int)).sum(),
             'mttr_min': (downtime_sec / 60 / stop_events) if stop_events > 0 else 0,
             'mtbf_min': ((production_time_sec / 60 / stop_events)
                          if stop_events > 0 else (production_time_sec / 60)),
@@ -702,11 +698,13 @@ def render_dashboard(df_tool, tool_id_selection, tolerance, downtime_gap_toleran
         c1, c2, c3, c4 = st.columns(4)
         t_s = summary_metrics.get('total_shots', 0)
         n_s = summary_metrics.get('normal_shots', 0)
-        su_s = summary_metrics.get('startup_shots', 0)
+        n_su = summary_metrics.get('normal_startup_shots', 0)
+        s_su = summary_metrics.get('slow_startup_shots', 0)
+        f_su = summary_metrics.get('failed_startup_shots', 0)
+        su_s = n_su + s_su
         s_s = t_s - n_s - su_s
         n_p = (n_s / t_s * 100) if t_s > 0 else 0
-        su_p = (su_s / t_s * 100) if t_s > 0 else 0
-        s_p = (s_s / t_s * 100) if t_s > 0 else 0
+
         with c1:
             st.metric("Total Shots", f"{t_s:,}")
         with c2:
@@ -718,19 +716,18 @@ def render_dashboard(df_tool, tool_id_selection, tolerance, downtime_gap_toleran
                 unsafe_allow_html=True
             )
         with c3:
-            st.metric("Start-up Shots", f"{su_s:,}")
+            st.metric("Start-up Shots (Valid)", f"{su_s:,}")
             st.markdown(
-                f'<span style="background-color:#9b59b6;'
-                f'color:#FFFFFF;padding:3px 8px;border-radius:10px;'
-                f'font-size:0.8rem;font-weight:bold;">{su_p:.1f}% of Total</span>',
+                f'<div style="font-size:0.8rem; color:#ccc;">'
+                f'<span style="color:#9b59b6; font-weight:bold;">{n_su:,} Normal</span> | '
+                f'<span style="color:#e67e22; font-weight:bold;">{s_su:,} Slow</span></div>',
                 unsafe_allow_html=True
             )
         with c4:
             st.metric("Stop Events", f"{summary_metrics.get('stop_events', 0)}")
             st.markdown(
-                f'<span style="background-color:{rr_utils.PASTEL_COLORS["red"]};'
-                f'color:#0E1117;padding:3px 8px;border-radius:10px;'
-                f'font-size:0.8rem;font-weight:bold;">{s_p:.1f}% Stopped Shots</span>',
+                f'<div style="font-size:0.8rem; color:#ccc;">'
+                f'<span style="color:#c0392b; font-weight:bold;">{f_su:,} Failed Start-ups</span></div>',
                 unsafe_allow_html=True
             )
 
@@ -846,12 +843,12 @@ def render_dashboard(df_tool, tool_id_selection, tolerance, downtime_gap_toleran
 
     with st.expander("View Shot Data Table", expanded=False):
         cols_to_show = ['shot_time', 'ACTUAL CT', 'adj_ct_sec',
-                        'time_diff_sec', 'stop_flag', 'startup_flag', 'stop_event']
+                        'time_diff_sec', 'stop_flag', 'shot_classification', 'stop_event']
         rename_map = {
             'shot_time': 'Date / Time', 'ACTUAL CT': 'Actual CT (sec)',
             'approved_ct': 'Approved CT', 'adj_ct_sec': 'Adjusted CT (sec)',
             'time_diff_sec': 'Time Difference (sec)',
-            'stop_flag': 'Stop Flag', 'startup_flag': 'Start-up Flag', 'stop_event': 'Stop Event'
+            'stop_flag': 'Stop Flag', 'shot_classification': 'Shot Classification', 'stop_event': 'Stop Event'
         }
         if show_approved_ct and 'approved_ct' in results['processed_df'].columns:
             cols_to_show.insert(1, 'approved_ct')
@@ -917,14 +914,14 @@ def render_dashboard(df_tool, tool_id_selection, tolerance, downtime_gap_toleran
                         if r[total_shots_col] > 0 else "0 (0.0%)"
                     ), axis=1
                 )
-
-                d_df["Start-up Shots"] = d_df.apply(
-                    lambda r: (
-                        f"{r.get('startup_shots', 0):,} "
-                        f"({r.get('startup_shots', 0) / r[total_shots_col] * 100:.1f}%)"
-                        if r[total_shots_col] > 0 else "0 (0.0%)"
-                    ), axis=1
-                )
+                
+                # Format sub-categories
+                if 'normal_startup_shots' in d_df.columns:
+                    d_df['Normal Start-ups'] = d_df['normal_startup_shots'].apply(lambda x: f"{x:,}")
+                if 'slow_startup_shots' in d_df.columns:
+                    d_df['Slow Start-ups'] = d_df['slow_startup_shots'].apply(lambda x: f"{x:,}")
+                if 'failed_startup_shots' in d_df.columns:
+                    d_df['Failed Start-ups'] = d_df['failed_startup_shots'].apply(lambda x: f"{x:,}")
 
                 if 'stopped_shots' not in d_df.columns:
                     d_df['stopped_shots'] = d_df[total_shots_col] - d_df.get('normal_shots', 0) - d_df.get('startup_shots', 0)
@@ -972,7 +969,7 @@ def render_dashboard(df_tool, tool_id_selection, tolerance, downtime_gap_toleran
 
                 final_cols = [
                     'RUN ID', 'Period (date/time from to)', 'Total shots',
-                    'Normal Shots', 'Start-up Shots', 'Stop Events', 'Mode CT (for the run)',
+                    'Normal Shots', 'Normal Start-ups', 'Slow Start-ups', 'Failed Start-ups', 'Stop Events', 'Mode CT (for the run)',
                     'Approved CT', 'Lower limit CT (sec)', 'Upper Limit CT (sec)',
                     'Total Run duration (d/h/m)', 'Production Time (d/h/m)',
                     'Downtime (d/h/m)', 'MTTR (min)', 'MTBF (min)', 'Stability (%)'
@@ -1195,7 +1192,7 @@ def render_dashboard(df_tool, tool_id_selection, tolerance, downtime_gap_toleran
 # --- 4. MAIN APP ENTRY POINT ---
 # ==============================================================================
 
-APP_VERSION = "v3.60"
+APP_VERSION = "v3.66"
 
 def run_run_rate_ui():
 
@@ -1220,7 +1217,7 @@ def run_run_rate_ui():
         st.info("👈 Upload one or more production data files to begin.")
         st.stop()
 
-    df_all = rr_utils.load_all_data(uploaded_files, _cache_version=APP_VERSION)
+    df_all = rr_utils.load_all_data(uploaded_files)
 
     id_col = "tool_id"
     if id_col not in df_all.columns:
@@ -1338,12 +1335,12 @@ def run_run_rate_ui():
         startup_stop_threshold_minutes = st.slider(
             "Start-up Stop Threshold (min)", 1.0, 60.0, 5.0, 0.5,
             key="rr_startup_thresh",
-            help="Minimum stop duration to trigger start-up shots."
+            help="Minimum gap to trigger a start-up sequence."
         )
         startup_shot_count = st.slider(
             "Start-up Shot Count", 0, 50, 5, 1,
             key="rr_startup_count",
-            help="Number of shots to label as start-up shots after a qualifying stop."
+            help="Number of shots to monitor during a start-up sequence."
         )
 
         enable_min_shots = st.checkbox(
