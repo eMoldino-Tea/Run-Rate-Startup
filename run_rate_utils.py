@@ -65,7 +65,7 @@ def get_renamed_summary_df(df_in):
         'run_label': 'RUN ID', 'stops': 'Stops', 'STOPS': 'Stops',
         'total_shots': 'Total Shots', 'Total Shots': 'Total Shots',
         'normal_shots': 'Normal Shots', 
-        'normal_startup_shots': 'Normal Start-ups', 'slow_startup_shots': 'Slow Start-ups', 'failed_startup_shots': 'Failed Start-ups',
+        'su_within_tol': 'Start-ups (Within Tol)', 'su_outside_tol': 'Start-ups (Outside Tol)', 
         'mttr_min': 'MTTR (min)', 'MTTR (min)': 'MTTR (min)',
         'mtbf_min': 'MTBF (min)', 'MTBF (min)': 'MTBF (min)',
         'stability_index': 'Stability Index (%)', 'STABILITY %': 'Stability Index (%)',
@@ -80,7 +80,7 @@ def get_renamed_summary_df(df_in):
 
     display_order = [
         'Hour', 'Date', 'Week', 'RUN ID', 'Approved CT', 'Mode CT',
-        'Stops', 'Total Shots', 'Normal Shots', 'Normal Start-ups', 'Slow Start-ups', 'Failed Start-ups', 'Stability Index (%)', 'MTTR (min)', 'MTBF (min)'
+        'Stops', 'Total Shots', 'Normal Shots', 'Start-ups (Within Tol)', 'Start-ups (Outside Tol)', 'Stability Index (%)', 'MTTR (min)', 'MTBF (min)'
     ]
     final_cols = [col for col in display_order if col in df_renamed.columns]
     for col in df_renamed.columns:
@@ -221,14 +221,12 @@ class RunRateCalculator:
 
     def __init__(self, df: pd.DataFrame, tolerance: float,
                  downtime_gap_tolerance: float, analysis_mode: str = 'aggregate',
-                 run_interval_hours: float = 8, startup_stop_threshold_minutes: float = 5.0,
-                 startup_shot_count: int = 5):
+                 run_interval_hours: float = 8, startup_shot_count: int = 5):
         self.df_raw = df.copy()
         self.tolerance = tolerance
         self.downtime_gap_tolerance = downtime_gap_tolerance
         self.analysis_mode = analysis_mode
         self.run_interval_hours = run_interval_hours
-        self.startup_stop_threshold_minutes = startup_stop_threshold_minutes
         self.startup_shot_count = startup_shot_count
         self.results = self._calculate_all_metrics()
 
@@ -252,22 +250,19 @@ class RunRateCalculator:
         shots = hourly_groups.size().rename('total_shots')
         
         if 'shot_classification' in df.columns:
-            normal_startups = df[df['shot_classification'] == 'Normal Start-up'].groupby('hour').size().rename('normal_startup_shots')
-            slow_startups = df[df['shot_classification'] == 'Slow Start-up (Pardoned)'].groupby('hour').size().rename('slow_startup_shots')
-            failed_startups = df[df['shot_classification'] == 'Failed Start-up'].groupby('hour').size().rename('failed_startup_shots')
+            su_within = df[df['shot_classification'] == 'Start-up shot within mode tolerance'].groupby('hour').size().rename('su_within_tol')
+            su_outside = df[df['shot_classification'] == 'Start-up shot outside mode tolerance'].groupby('hour').size().rename('su_outside_tol')
         else:
-            normal_startups = pd.Series(0, index=hourly_groups.indices.keys(), name='normal_startup_shots')
-            slow_startups = pd.Series(0, index=hourly_groups.indices.keys(), name='slow_startup_shots')
-            failed_startups = pd.Series(0, index=hourly_groups.indices.keys(), name='failed_startup_shots')
+            su_within = pd.Series(0, index=hourly_groups.indices.keys(), name='su_within_tol')
+            su_outside = pd.Series(0, index=hourly_groups.indices.keys(), name='su_outside_tol')
 
         hourly_summary = pd.DataFrame(index=range(24))
         hourly_summary['hour'] = hourly_summary.index
         hourly_summary = (hourly_summary
                           .join(stops.rename('stops'))
                           .join(shots)
-                          .join(normal_startups)
-                          .join(slow_startups)
-                          .join(failed_startups)
+                          .join(su_within)
+                          .join(su_outside)
                           .join(uptime_min.rename('uptime_min'))
                           .fillna(0)
                           .join(hourly_total_downtime_sec.rename('total_downtime_sec'))
@@ -275,8 +270,8 @@ class RunRateCalculator:
 
         hourly_summary['normal_shots'] = (hourly_summary['total_shots'] 
                                           - hourly_summary['stops'] 
-                                          - hourly_summary['normal_startup_shots'] 
-                                          - hourly_summary['slow_startup_shots'])
+                                          - hourly_summary['su_within_tol'] 
+                                          - hourly_summary['su_outside_tol'])
 
         hourly_summary['mttr_min'] = ((hourly_summary['total_downtime_sec'] / 60)
                                       / hourly_summary['stops'].replace(0, np.nan))
@@ -363,55 +358,38 @@ class RunRateCalculator:
         is_abnormal = (df['ACTUAL CT'] < df['lower_limit']) | (df['ACTUAL CT'] > df['upper_limit'])
         is_hard_stop = df['ACTUAL CT'] >= 999.9
 
-        is_strict_stop = is_time_gap | is_hard_stop
-
-        # STRICT START-UP LOGIC (Categorization & Pardons)
+        # START-UP LOGIC (Triggered on every run automatically)
         if self.startup_shot_count > 0:
-            # Trigger start-up sequence on a gap >= threshold OR start of a tool
-            trigger = (df['time_diff_sec'] >= (self.startup_stop_threshold_minutes * 60)) | mask_first_shot
-            df['startup_group'] = trigger.cumsum()
+            df['run_shot_idx'] = df.groupby('run_id').cumcount() + 1
+            df['startup_flag'] = np.where(df['run_shot_idx'] <= self.startup_shot_count, 1, 0)
             
-            # Cumulatively count ONLY non-strict-stop shots within each group
-            df['is_not_strict_stop'] = np.where(is_strict_stop, 0, 1)
-            df['valid_shot_cumcount'] = df.groupby('startup_group')['is_not_strict_stop'].cumsum()
-            df['prev_valid_count'] = df.groupby('startup_group')['valid_shot_cumcount'].shift(1).fillna(0)
-            
-            # Window active check
-            in_startup_window = np.where(
-                is_strict_stop,
-                df['prev_valid_count'] < self.startup_shot_count,
-                df['valid_shot_cumcount'] <= self.startup_shot_count
-            )
-            
-            # Classification logic
-            cond_normal_startup = in_startup_window & (~is_strict_stop) & (~is_abnormal)
-            cond_slow_startup = in_startup_window & (~is_strict_stop) & is_abnormal
-            cond_failed_startup = in_startup_window & is_strict_stop
-
-            df['startup_flag'] = np.where(cond_normal_startup | cond_slow_startup, 1, 0)
-            df['stop_flag'] = np.where(is_strict_stop | (is_abnormal & ~in_startup_window), 1, 0)
+            # Classification
+            cond_startup_within = (df['startup_flag'] == 1) & (~is_abnormal) & (~is_hard_stop) & (~is_time_gap)
+            cond_startup_outside = (df['startup_flag'] == 1) & (is_abnormal | is_hard_stop | is_time_gap)
 
             df['shot_classification'] = 'Normal Production'
+            df.loc[cond_startup_within, 'shot_classification'] = 'Start-up shot within mode tolerance'
+            df.loc[cond_startup_outside, 'shot_classification'] = 'Start-up shot outside mode tolerance'
+
+            # Force stop_flag = 0 for all start-up shots to perfectly isolate them from MTTR/MTBF
+            df['stop_flag'] = np.where(
+                (df['startup_flag'] == 0) & (is_time_gap | is_abnormal | is_hard_stop), 
+                1, 
+                0
+            )
             df.loc[df['stop_flag'] == 1, 'shot_classification'] = 'Stopped Shot'
-            df.loc[cond_normal_startup, 'shot_classification'] = 'Normal Start-up'
-            df.loc[cond_slow_startup, 'shot_classification'] = 'Slow Start-up (Pardoned)'
-            df.loc[cond_failed_startup, 'shot_classification'] = 'Failed Start-up'
-            
-            df.drop(columns=['startup_group', 'is_not_strict_stop', 'valid_shot_cumcount', 'prev_valid_count'], inplace=True, errors='ignore')
+            df.drop(columns=['run_shot_idx'], inplace=True)
         else:
             df['startup_flag'] = 0
-            df['stop_flag'] = np.where(is_strict_stop | is_abnormal, 1, 0)
+            df['stop_flag'] = np.where(is_time_gap | is_abnormal | is_hard_stop, 1, 0)
             df['shot_classification'] = np.where(df['stop_flag'] == 1, 'Stopped Shot', 'Normal Production')
         
-        # Override rules for the very first shot of any run
+        # Start-up Event (flags the beginning shot of a startup sequence)
+        df['startup_event'] = np.where((df['startup_flag'] == 1) & (df.groupby('tool_id')['startup_flag'].shift(1, fill_value=0) == 0), 1, 0)
+
+        # Override rules for the very first shot of any run to ensure it is never a stop
         override_mask = mask_first_shot | is_new_run
         df.loc[override_mask, 'stop_flag'] = 0
-        if self.startup_shot_count > 0:
-            df.loc[override_mask, 'startup_flag'] = 1
-            df.loc[override_mask & is_abnormal, 'shot_classification'] = 'Slow Start-up (Pardoned)'
-            df.loc[override_mask & ~is_abnormal, 'shot_classification'] = 'Normal Start-up'
-        else:
-            df.loc[override_mask, 'shot_classification'] = 'Normal Production'
 
         df['prev_stop_flag'] = df.groupby('tool_id')['stop_flag'].shift(1, fill_value=0)
         df['stop_event'] = (df['stop_flag'] == 1) & (df['prev_stop_flag'] == 0)
@@ -427,7 +405,13 @@ class RunRateCalculator:
                 last_ct = run_df.iloc[-1]['ACTUAL CT']
                 run_durations_sec.append((end - start).total_seconds() + last_ct)
 
-        total_runtime_sec = sum(run_durations_sec)
+        # Deduct gaps within start-up shots from the total runtime 
+        # to ensure they absolutely do not impact downtime.
+        startup_gaps = df.loc[(df['startup_flag'] == 1) & is_time_gap, 'next_shot_time_diff'] - df.loc[(df['startup_flag'] == 1) & is_time_gap, 'ACTUAL CT']
+        startup_gap_sec = startup_gaps.sum()
+        
+        total_runtime_sec = max(0, sum(run_durations_sec) - startup_gap_sec)
+        
         prod_df = df[df['stop_flag'] == 0]
         production_time_sec = prod_df['ACTUAL CT'].sum()
         downtime_sec = max(0, total_runtime_sec - production_time_sec)
@@ -550,17 +534,21 @@ def _run_metrics_from_processed(df_slice: pd.DataFrame) -> dict:
     last_ct = df_slice.iloc[-1]['ACTUAL CT']
     duration = (end - start).total_seconds() + last_ct
 
+    # Exclude start-up gaps perfectly from duration so downtime is unaffected
+    if 'startup_flag' in df_slice.columns and 'adj_ct_sec' in df_slice.columns:
+        startup_gap_sec = (df_slice.loc[df_slice['startup_flag'] == 1, 'adj_ct_sec'] - df_slice.loc[df_slice['startup_flag'] == 1, 'ACTUAL CT']).sum()
+        duration = max(0, duration - startup_gap_sec)
+
     prod_df = df_slice[df_slice['stop_flag'] == 0]
     prod_sec = prod_df['ACTUAL CT'].sum()
     down_sec = max(0, duration - prod_sec)
     tot_stops = df_slice['stop_event'].sum()
     tot_shots = len(df_slice)
     
-    normal_su = (df_slice['shot_classification'] == 'Normal Start-up').sum() if 'shot_classification' in df_slice.columns else 0
-    slow_su = (df_slice['shot_classification'] == 'Slow Start-up (Pardoned)').sum() if 'shot_classification' in df_slice.columns else 0
-    failed_su = (df_slice['shot_classification'] == 'Failed Start-up').sum() if 'shot_classification' in df_slice.columns else 0
+    su_within = (df_slice['shot_classification'] == 'Start-up shot within mode tolerance').sum() if 'shot_classification' in df_slice.columns else 0
+    su_outside = (df_slice['shot_classification'] == 'Start-up shot outside mode tolerance').sum() if 'shot_classification' in df_slice.columns else 0
     
-    startup_shots = normal_su + slow_su
+    startup_shots = su_within + su_outside
     normal_shots = len(prod_df) - startup_shots
 
     if 'mode_ct' in df_slice.columns and not df_slice['mode_ct'].dropna().empty:
@@ -581,9 +569,8 @@ def _run_metrics_from_processed(df_slice: pd.DataFrame) -> dict:
         'tot_shots': tot_shots,
         'normal_shots': normal_shots,
         'startup_shots': startup_shots,
-        'normal_startup_shots': normal_su,
-        'slow_startup_shots': slow_su,
-        'failed_startup_shots': failed_su,
+        'su_within_tol': su_within,
+        'su_outside_tol': su_outside,
         'mode_ct': mode_ct,
         'approved_ct': approved_ct,
         'stability_index': (prod_sec / duration * 100) if duration > 0 else 100.0,
@@ -594,11 +581,9 @@ def _run_metrics_from_processed(df_slice: pd.DataFrame) -> dict:
 
 
 def calculate_daily_summaries_for_week(df_week, tolerance, downtime_gap_tolerance,
-                                       analysis_mode, run_interval_hours=8,
-                                       startup_stop_threshold_minutes=5.0, startup_shot_count=5):
+                                       analysis_mode, run_interval_hours=8, startup_shot_count=5):
     calc_global = RunRateCalculator(df_week, tolerance, downtime_gap_tolerance,
-                                    analysis_mode, run_interval_hours,
-                                    startup_stop_threshold_minutes, startup_shot_count)
+                                    analysis_mode, run_interval_hours, startup_shot_count)
     df_proc = calc_global.results.get('processed_df', df_week)
     if df_proc.empty:
         return pd.DataFrame()
@@ -620,9 +605,8 @@ def calculate_daily_summaries_for_week(df_week, tolerance, downtime_gap_toleranc
             'total_shots': m['tot_shots'],
             'normal_shots': m['normal_shots'],
             'startup_shots': m['startup_shots'],
-            'normal_startup_shots': m['normal_startup_shots'],
-            'slow_startup_shots': m['slow_startup_shots'],
-            'failed_startup_shots': m['failed_startup_shots'],
+            'su_within_tol': m['su_within_tol'],
+            'su_outside_tol': m['su_outside_tol'],
             'total_downtime_sec': m['down_sec'],
             'uptime_min': m['prod_sec'] / 60,
             'mode_ct': m['mode_ct'],
@@ -632,11 +616,9 @@ def calculate_daily_summaries_for_week(df_week, tolerance, downtime_gap_toleranc
 
 
 def calculate_weekly_summaries_for_month(df_month, tolerance, downtime_gap_tolerance,
-                                         analysis_mode, run_interval_hours=8,
-                                         startup_stop_threshold_minutes=5.0, startup_shot_count=5):
+                                         analysis_mode, run_interval_hours=8, startup_shot_count=5):
     calc_global = RunRateCalculator(df_month, tolerance, downtime_gap_tolerance,
-                                    analysis_mode, run_interval_hours,
-                                    startup_stop_threshold_minutes, startup_shot_count)
+                                    analysis_mode, run_interval_hours, startup_shot_count)
     df_proc = calc_global.results.get('processed_df', df_month)
     if df_proc.empty:
         return pd.DataFrame()
@@ -659,9 +641,8 @@ def calculate_weekly_summaries_for_month(df_month, tolerance, downtime_gap_toler
             'total_shots': m['tot_shots'],
             'normal_shots': m['normal_shots'],
             'startup_shots': m['startup_shots'],
-            'normal_startup_shots': m['normal_startup_shots'],
-            'slow_startup_shots': m['slow_startup_shots'],
-            'failed_startup_shots': m['failed_startup_shots'],
+            'su_within_tol': m['su_within_tol'],
+            'su_outside_tol': m['su_outside_tol'],
             'total_downtime_sec': m['down_sec'],
             'uptime_min': m['prod_sec'] / 60,
             'mode_ct': m['mode_ct'],
@@ -749,14 +730,12 @@ def build_display_results(df: pd.DataFrame, run_interval_hours: float = 8) -> di
 
 
 def calculate_run_summaries(df_period, tolerance, downtime_gap_tolerance,
-                            run_interval_hours=8, pre_processed=False,
-                            startup_stop_threshold_minutes=5.0, startup_shot_count=5):
+                            run_interval_hours=8, pre_processed=False, startup_shot_count=5):
     if pre_processed and 'stop_flag' in df_period.columns:
         df_proc = df_period
     else:
         calc_base = RunRateCalculator(df_period, tolerance, downtime_gap_tolerance,
-                                      'aggregate', run_interval_hours,
-                                      startup_stop_threshold_minutes, startup_shot_count)
+                                      'aggregate', run_interval_hours, startup_shot_count=startup_shot_count)
         df_proc = calc_base.results.get('processed_df', df_period)
 
     run_summary_list = []
@@ -776,9 +755,8 @@ def calculate_run_summaries(df_period, tolerance, downtime_gap_tolerance,
             'total_shots': m['tot_shots'],
             'normal_shots': m['normal_shots'],
             'startup_shots': m['startup_shots'],
-            'normal_startup_shots': m['normal_startup_shots'],
-            'slow_startup_shots': m['slow_startup_shots'],
-            'failed_startup_shots': m['failed_startup_shots'],
+            'su_within_tol': m['su_within_tol'],
+            'su_outside_tol': m['su_outside_tol'],
             'stopped_shots': m['tot_shots'] - m['normal_shots'] - m['startup_shots'],
             'mode_ct': m['mode_ct'], 
             'lower_limit': lower_limit,
@@ -843,22 +821,18 @@ def plot_shot_bar_chart(df, lower_limit, upper_limit, mode_ct,
         return
     df = df.copy()
 
-    # Apply specific visual coloring based on our exact text classifications
     conditions = [
         df['shot_classification'] == 'Normal Production',
-        df['shot_classification'] == 'Normal Start-up',
-        df['shot_classification'] == 'Slow Start-up (Pardoned)',
-        df['shot_classification'] == 'Failed Start-up',
+        df['shot_classification'] == 'Start-up shot within mode tolerance',
+        df['shot_classification'] == 'Start-up shot outside mode tolerance',
         df['shot_classification'] == 'Stopped Shot'
     ]
     choices = [
         '#3498DB',             # Blue
         '#9b59b6',             # Purple
         '#e67e22',             # Orange
-        '#c0392b',             # Dark Red
-        PASTEL_COLORS['red']   # Bright Pastel Red
+        PASTEL_COLORS['red']   # Pastel Red
     ]
-    # Default to blue if somehow unclassified
     df['color'] = np.select(conditions, choices, default='#3498DB')
 
     downtime_gap_indices = df[df['adj_ct_sec'] != df['ACTUAL CT']].index
@@ -888,9 +862,8 @@ def plot_shot_bar_chart(df, lower_limit, upper_limit, mode_ct,
     
     # Legend Entries
     fig.add_trace(go.Bar(x=[None], y=[None], name="Normal Shot", marker_color='#3498DB', showlegend=True))
-    fig.add_trace(go.Bar(x=[None], y=[None], name="Normal Start-up", marker_color='#9b59b6', showlegend=True))
-    fig.add_trace(go.Bar(x=[None], y=[None], name="Slow Start-up", marker_color='#e67e22', showlegend=True))
-    fig.add_trace(go.Bar(x=[None], y=[None], name="Failed Start-up", marker_color='#c0392b', showlegend=True))
+    fig.add_trace(go.Bar(x=[None], y=[None], name="Start-up (Within Tol)", marker_color='#9b59b6', showlegend=True))
+    fig.add_trace(go.Bar(x=[None], y=[None], name="Start-up (Outside Tol)", marker_color='#e67e22', showlegend=True))
     fig.add_trace(go.Bar(x=[None], y=[None], name="Stopped Shot", marker_color=PASTEL_COLORS['red'], showlegend=True))
     
     fig.add_trace(go.Scatter(
@@ -1320,13 +1293,11 @@ def generate_mttr_mtbf_analysis(analysis_df, analysis_level):
 # ==============================================================================
 
 def prepare_and_generate_run_based_excel(df_for_export, tolerance, downtime_gap_tolerance,
-                                          run_interval_hours, tool_id_selection,
-                                          startup_stop_threshold_minutes=5.0, startup_shot_count=5):
+                                          run_interval_hours, tool_id_selection, startup_shot_count=5):
     """Generates the run-based Excel report using the full calculation engine."""
     try:
         base_calc = RunRateCalculator(df_for_export, tolerance, downtime_gap_tolerance,
-                                      'aggregate', run_interval_hours,
-                                      startup_stop_threshold_minutes, startup_shot_count)
+                                      'aggregate', run_interval_hours, startup_shot_count)
         df_processed = base_calc.results.get("processed_df", pd.DataFrame())
 
         if df_processed.empty or 'run_id' not in df_processed.columns:
@@ -1348,7 +1319,7 @@ def prepare_and_generate_run_based_excel(df_for_export, tolerance, downtime_gap_
         desired_columns_base = [
             'SUPPLIER_NAME', 'tool_id', 'SESSION ID', 'shot_time',
             'APPROVED_CT', 'approved_ct', 'ACTUAL CT',
-            'time_diff_sec', 'stop_flag', 'shot_classification', 'stop_event', 'run_group'
+            'time_diff_sec', 'stop_flag', 'startup_flag', 'startup_event', 'shot_classification', 'stop_event', 'run_group'
         ]
         formula_columns = ['CUMULATIVE COUNT', 'RUN DURATION', 'TIME BUCKET']
 
@@ -1417,6 +1388,8 @@ def prepare_and_generate_run_based_excel(df_for_export, tolerance, downtime_gap_
                         'shot_time': 'LOCAL_SHOT_TIME',
                         'time_diff_sec': 'TIME DIFF SEC',
                         'stop_flag': 'STOP',
+                        'startup_flag': 'STARTUP FLAG',
+                        'startup_event': 'STARTUP EVENT',
                         'shot_classification': 'SHOT CLASSIFICATION',
                         'stop_event': 'STOP EVENT'
                     }
@@ -1425,7 +1398,7 @@ def prepare_and_generate_run_based_excel(df_for_export, tolerance, downtime_gap_
                 final_desired_renamed = [
                     'SUPPLIER_NAME', 'EQUIPMENT_CODE', 'SESSION ID', 'Shot Sequence',
                     'LOCAL_SHOT_TIME', 'APPROVED_CT', 'approved_ct', 'ACTUAL CT',
-                    'TIME DIFF SEC', 'STOP', 'SHOT CLASSIFICATION', 'STOP EVENT', 'run_group',
+                    'TIME DIFF SEC', 'STOP', 'STARTUP FLAG', 'STARTUP EVENT', 'SHOT CLASSIFICATION', 'STOP EVENT', 'run_group',
                     'CUMULATIVE COUNT', 'RUN DURATION', 'TIME BUCKET'
                 ]
                 for col in final_desired_renamed:
@@ -1635,7 +1608,7 @@ def generate_excel_report(all_runs_data, tolerance):
                         continue
 
                     cell_format = data_format
-                    if col_name in ['STOP']:
+                    if col_name in ['STOP', 'STARTUP FLAG', 'STARTUP EVENT']:
                         ws.write_number(current_row_excel_idx, c_idx,
                                         int(value) if pd.notna(value) else 0, cell_format)
                     elif col_name == 'STOP EVENT':
@@ -1748,7 +1721,7 @@ def generate_excel_report(all_runs_data, tolerance):
 # ==============================================================================
 
 def calculate_risk_scores(df_all, run_interval_hours=8, min_shots_filter=1, tolerance=0.05,
-                          downtime_gap_tolerance=2.0, startup_stop_threshold_minutes=5.0, startup_shot_count=5):
+                          downtime_gap_tolerance=2.0, startup_shot_count=5):
     """Calculates Risk Scores based on isolated block metrics per tool."""
     if df_all.empty or 'tool_id' not in df_all.columns:
         return pd.DataFrame()
@@ -1766,15 +1739,13 @@ def calculate_risk_scores(df_all, run_interval_hours=8, min_shots_filter=1, tole
         if df_period.empty:
             continue
 
-        calc = RunRateCalculator(df_period, tolerance, downtime_gap_tolerance, 'aggregate', run_interval_hours,
-                                 startup_stop_threshold_minutes, startup_shot_count)
+        calc = RunRateCalculator(df_period, tolerance, downtime_gap_tolerance, 'aggregate', run_interval_hours, startup_shot_count)
         res = calc.results
         df_processed = res.get('processed_df')
         if df_processed is None or df_processed.empty:
             continue
 
-        run_summary_df = calculate_run_summaries(df_processed, tolerance, downtime_gap_tolerance, run_interval_hours, pre_processed=True,
-                                                 startup_stop_threshold_minutes=startup_stop_threshold_minutes, startup_shot_count=startup_shot_count)
+        run_summary_df = calculate_run_summaries(df_processed, tolerance, downtime_gap_tolerance, run_interval_hours, pre_processed=True, startup_shot_count=startup_shot_count)
         if run_summary_df.empty:
             continue
 
@@ -1809,8 +1780,7 @@ def calculate_risk_scores(df_all, run_interval_hours=8, min_shots_filter=1, tole
 
         for _, week_key, df_week in sorted_weeks:
             weekly_run_summary = calculate_run_summaries(df_week.copy(), tolerance, downtime_gap_tolerance,
-                                                          run_interval_hours, pre_processed=True,
-                                                          startup_stop_threshold_minutes=startup_stop_threshold_minutes, startup_shot_count=startup_shot_count)
+                                                          run_interval_hours, pre_processed=True, startup_shot_count=startup_shot_count)
             if not weekly_run_summary.empty:
                 if 'total_shots' in weekly_run_summary.columns:
                     weekly_run_summary = weekly_run_summary[
@@ -1935,15 +1905,14 @@ def generate_weekly_comparison_pptx(df_weekly: pd.DataFrame, tool_id: str) -> by
             return "", None
 
     METRICS = [
-        ("Stability Index",     "Stability Index (%)",  "{:.1f}%",  True),
-        ("Efficiency",          "Efficiency (%)",        "{:.1f}%",  True),
-        ("MTTR",                "MTTR (min)",            "{:.1f} min", False),
-        ("MTBF",                "MTBF (min)",            "{:.1f} min", True),
-        ("Normal Shots",        "Normal Shots",          "{:,.0f}",   True),
-        ("Normal Start-ups",    "Normal Start-ups",      "{:,.0f}",   True),
-        ("Slow Start-ups",      "Slow Start-ups",        "{:,.0f}",   True),
-        ("Failed Start-ups",    "Failed Start-ups",      "{:,.0f}",   False),
-        ("Stop Events",         "Stop Events",           "{:.0f}",    False),
+        ("Stability Index",       "Stability Index (%)",     "{:.1f}%",  True),
+        ("Efficiency",            "Efficiency (%)",          "{:.1f}%",  True),
+        ("MTTR",                  "MTTR (min)",              "{:.1f} min", False),
+        ("MTBF",                  "MTBF (min)",              "{:.1f} min", True),
+        ("Normal Shots",          "Normal Shots",            "{:,.0f}",   True),
+        ("Start-ups (Within)",    "Start-ups (Within Tol)",  "{:,.0f}",   True),
+        ("Start-ups (Outside)",   "Start-ups (Outside Tol)", "{:,.0f}",   True),
+        ("Stop Events",           "Stop Events",             "{:.0f}",    False),
     ]
 
     df = df_weekly.reset_index(drop=True)
@@ -1955,7 +1924,7 @@ def generate_weekly_comparison_pptx(df_weekly: pd.DataFrame, tool_id: str) -> by
         if col not in df.columns:
             totals[col] = None
             continue
-        if col in ("Total Shots", "Normal Shots", "Normal Start-ups", "Slow Start-ups", "Failed Start-ups", "Stop Events"):
+        if col in ("Total Shots", "Normal Shots", "Start-ups (Within Tol)", "Start-ups (Outside Tol)", "Stop Events"):
             totals[col] = df[col].sum()
         else:
             totals[col] = df[col].mean()
@@ -2108,7 +2077,7 @@ def generate_weekly_comparison_pptx(df_weekly: pd.DataFrame, tool_id: str) -> by
     tf3 = note_box.text_frame
     p3  = tf3.paragraphs[0]
     r3  = p3.add_run()
-    r3.text  = f"Generated by Run Rate Analysis v3.66  |  Tool: {tool_id}  |  {pd.Timestamp.now().strftime('%d %b %Y')}"
+    r3.text  = f"Generated by Run Rate Analysis v3.70  |  Tool: {tool_id}  |  {pd.Timestamp.now().strftime('%d %b %Y')}"
     r3.font.size   = Pt(8)
     r3.font.italic = True
     r3.font.color.rgb = rgb("9E9E9E")
