@@ -90,7 +90,7 @@ def get_renamed_summary_df(df_in):
 
 
 @st.cache_data
-def load_all_data(files, _cache_version=None):
+def load_all_data(files, dayfirst=True, _cache_version=None):
     df_list = []
     for file in files:
         try:
@@ -133,10 +133,7 @@ def load_all_data(files, _cache_version=None):
             else:
                 shot_time_col = get_col("LOCAL_SHOT_TIME", "SHOT TIME", "TIMESTAMP", "DATE", "TIME")
                 if shot_time_col:
-                    parsed = pd.to_datetime(df[shot_time_col], dayfirst=True, errors="coerce")
-                    nat_ratio = parsed.isna().mean()
-                    if nat_ratio > 0.5:
-                        parsed = pd.to_datetime(df[shot_time_col], format="mixed", dayfirst=True, errors="coerce")
+                    parsed = pd.to_datetime(df[shot_time_col], format="mixed", dayfirst=dayfirst, errors="coerce")
                     df["shot_time"] = parsed
 
             session_col = get_col("COUNTER_CODE", "SESSION ID")

@@ -316,14 +316,14 @@ def render_dashboard(df_tool, tool_id_selection, tolerance, downtime_gap_toleran
         sub_header = f"Summary for {selected_date.strftime('%d %b %Y')}"
 
     elif "Weekly" in analysis_level:
-        available_years = sorted(df_processed['year'].unique())
+        available_years = sorted(df_processed['year'].dropna().unique())
         col_w_sel, col_w_info = st.columns([1, 2])
         with col_w_sel:
             c_yr, c_wk = st.columns(2)
-            with c_yr: selected_year = st.selectbox("Select Year", options=available_years, index=len(available_years) - 1, key="rr_year_week_select")
-            weeks_in_year = df_processed[df_processed['year'] == selected_year]['week'].unique()
+            with c_yr: selected_year = st.selectbox("Select Year", options=available_years, index=max(0, len(available_years) - 1), key="rr_year_week_select")
+            weeks_in_year = df_processed[df_processed['year'] == selected_year]['week'].dropna().unique()
             sorted_weeks = sorted(weeks_in_year)
-            with c_wk: selected_week = st.selectbox("Select Week", options=sorted_weeks, index=len(sorted_weeks) - 1, format_func=lambda w: f"Week {w}", key="rr_week_select")
+            with c_wk: selected_week = st.selectbox("Select Week", options=sorted_weeks, index=max(0, len(sorted_weeks) - 1), format_func=lambda w: f"Week {int(w)}", key="rr_week_select")
         try: start_of_week = datetime.strptime(f'{selected_year}-W{int(selected_week):02d}-1', "%G-W%V-%u")
         except Exception: start_of_week = (datetime(selected_year, 1, 1) + timedelta(weeks=int(selected_week)))
         end_of_week = start_of_week + timedelta(days=6)
@@ -337,20 +337,42 @@ def render_dashboard(df_tool, tool_id_selection, tolerance, downtime_gap_toleran
 
     elif "Monthly" in analysis_level:
         df_processed['year_cal'] = df_processed['shot_time'].dt.year
-        available_years = sorted(df_processed['year_cal'].unique())
+        available_years = sorted([y for y in df_processed['year_cal'].dropna().unique()])
         col_m_sel, col_m_info = st.columns([1, 2])
+        
         with col_m_sel:
             c_yr, c_mo = st.columns(2)
-            with c_yr: selected_year = st.selectbox("Select Year", options=available_years, index=len(available_years) - 1, key="rr_year_select")
-            months_in_year = df_processed[df_processed['year_cal'] == selected_year]['month'].unique()
+            with c_yr: 
+                selected_year = st.selectbox(
+                    "Select Year", options=available_years, 
+                    index=max(0, len(available_years) - 1) if available_years else 0, key="rr_year_select"
+                )
+            
+            months_in_year = []
+            if selected_year:
+                months_in_year = df_processed[df_processed['year_cal'] == selected_year]['month'].dropna().unique()
             sorted_months = sorted(months_in_year)
-            with c_mo: selected_month_period = st.selectbox("Select Month", options=sorted_months, index=len(sorted_months) - 1, format_func=lambda p: p.strftime('%B'), key="rr_month_select")
+            
+            with c_mo: 
+                selected_month_period = st.selectbox(
+                    "Select Month", options=sorted_months, 
+                    index=max(0, len(sorted_months) - 1) if sorted_months else 0, 
+                    format_func=lambda p: p.strftime('%B') if p else "", key="rr_month_select"
+                )
+        
         with col_m_info:
             info_placeholder = st.empty()
-            info_base_text = f"**Viewing Month:** {selected_month_period.strftime('%B %Y')}"
+            if selected_month_period:
+                info_base_text = f"**Viewing Month:** {selected_month_period.strftime('%B %Y')}"
+            else:
+                info_base_text = "**Viewing Month:** N/A"
 
-        df_view = df_processed[df_processed["month"] == selected_month_period]
-        sub_header = f"Summary for {selected_month_period.strftime('%B %Y')}"
+        if selected_month_period:
+            df_view = df_processed[df_processed["month"] == selected_month_period]
+        else:
+            df_view = pd.DataFrame()
+            
+        sub_header = f"Summary for {selected_month_period.strftime('%B %Y') if selected_month_period else 'N/A'}"
 
     elif "Custom Period" in analysis_level:
         min_date = df_processed['date'].min()
@@ -844,6 +866,11 @@ def run_run_rate_ui():
     )
 
     st.sidebar.title("File Upload")
+    
+    # NEW FIX: Explicit Date Format Fallback
+    date_format = st.sidebar.radio("Date Format (if ambiguous)", ["Global (DD/MM/YYYY)", "US (MM/DD/YYYY)"])
+    dayfirst_setting = (date_format == "Global (DD/MM/YYYY)")
+    
     uploaded_files = st.sidebar.file_uploader(
         "Upload one or more Run Rate files (Excel / CSV)",
         type=["xlsx", "xls", "csv"], accept_multiple_files=True, key="rr_file_uploader"
@@ -853,7 +880,7 @@ def run_run_rate_ui():
         st.info("👈 Upload one or more production data files to begin.")
         st.stop()
 
-    df_all = rr_utils.load_all_data(uploaded_files, _cache_version=APP_VERSION)
+    df_all = rr_utils.load_all_data(uploaded_files, dayfirst=dayfirst_setting, _cache_version=APP_VERSION)
 
     id_col = "tool_id"
     if id_col not in df_all.columns:
