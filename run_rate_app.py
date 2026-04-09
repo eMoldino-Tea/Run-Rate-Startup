@@ -648,11 +648,12 @@ def render_dashboard(df_tool, tool_id_selection, tolerance, downtime_gap_toleran
 
     with st.expander("View Shot Data Table", expanded=False):
         cols_to_show = ['shot_time', 'ACTUAL CT', 'adj_ct_sec', 'time_diff_sec', 
-                        'startup_flag', 'startup_event', 'stop_flag', 'stop_event']
+                        'shot_classification', 'startup_flag', 'startup_event', 'stop_flag', 'stop_event']
         rename_map = {
             'shot_time': 'Date / Time', 'ACTUAL CT': 'Actual CT (sec)',
             'approved_ct': 'Approved CT', 'adj_ct_sec': 'Adjusted CT (sec)',
             'time_diff_sec': 'Time Difference (sec)',
+            'shot_classification': 'Shot Classification',
             'startup_flag': 'Start-up Flag', 'startup_event': 'Start-up Event',
             'stop_flag': 'Stop Flag', 'stop_event': 'Stop Event'
         }
@@ -867,9 +868,6 @@ def run_run_rate_ui():
 
     st.sidebar.title("File Upload")
     
-    # NEW FIX: Explicit Date Format Fallback
-    date_format = st.sidebar.radio("Date Format (if ambiguous)", ["ISO / Default (YYYY-MM-DD)", "Global (DD/MM/YYYY)", "US (MM/DD/YYYY)"])
-    
     uploaded_files = st.sidebar.file_uploader(
         "Upload one or more Run Rate files (Excel / CSV)",
         type=["xlsx", "xls", "csv"], accept_multiple_files=True, key="rr_file_uploader"
@@ -879,7 +877,7 @@ def run_run_rate_ui():
         st.info("👈 Upload one or more production data files to begin.")
         st.stop()
 
-    df_all = rr_utils.load_all_data(uploaded_files, date_format=date_format, _cache_version=APP_VERSION)
+    df_all = rr_utils.load_all_data(uploaded_files, _cache_version=APP_VERSION)
 
     id_col = "tool_id"
     if id_col not in df_all.columns:

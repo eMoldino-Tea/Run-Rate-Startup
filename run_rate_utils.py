@@ -90,7 +90,7 @@ def get_renamed_summary_df(df_in):
 
 
 @st.cache_data
-def load_all_data(files, date_format="ISO / Default (YYYY-MM-DD)", _cache_version=None):
+def load_all_data(files, _cache_version=None):
     df_list = []
     for file in files:
         try:
@@ -133,14 +133,7 @@ def load_all_data(files, date_format="ISO / Default (YYYY-MM-DD)", _cache_versio
             else:
                 shot_time_col = get_col("LOCAL_SHOT_TIME", "SHOT TIME", "TIMESTAMP", "DATE", "TIME")
                 if shot_time_col:
-                    if date_format == "Global (DD/MM/YYYY)":
-                        parsed = pd.to_datetime(df[shot_time_col], format="mixed", dayfirst=True, errors="coerce")
-                    elif date_format == "US (MM/DD/YYYY)":
-                        parsed = pd.to_datetime(df[shot_time_col], format="mixed", dayfirst=False, errors="coerce")
-                    else:
-                        # Ensures proper Year-Month-Day parsing
-                        parsed = pd.to_datetime(df[shot_time_col], format="mixed", yearfirst=True, dayfirst=False, errors="coerce")
-                        
+                    parsed = pd.to_datetime(df[shot_time_col], format="mixed", yearfirst=True, dayfirst=False, errors="coerce")
                     df["shot_time"] = parsed
 
             session_col = get_col("COUNTER_CODE", "SESSION ID")
@@ -330,6 +323,14 @@ class RunRateCalculator:
 
         df['adj_ct_sec'] = df['ACTUAL CT']
         df.loc[is_time_gap, 'adj_ct_sec'] = df['next_shot_time_diff']
+        
+        # Determine exact Shot Classification
+        df['shot_classification'] = np.where(
+            df['startup_flag'] == 1,
+            np.where((df['ACTUAL CT'] >= df['lower_limit']) & (df['ACTUAL CT'] <= df['upper_limit']),
+                     'Start Up Shot within Mode CT', 'Start Up Shot outside Mode CT'),
+            np.where(df['stop_flag'] == 1, 'Stop Shot', 'Normal Shot')
+        )
 
         run_durations_sec = []
         for _, run_df in df.groupby('run_id'):
@@ -1177,7 +1178,7 @@ def prepare_and_generate_run_based_excel(df_for_export, tolerance, downtime_gap_
         desired_columns_base = [
             'SUPPLIER_NAME', 'tool_id', 'SESSION ID', 'shot_time',
             'APPROVED_CT', 'approved_ct', 'ACTUAL CT',
-            'time_diff_sec', 'startup_flag', 'startup_event', 'stop_flag', 'stop_event', 'run_group'
+            'time_diff_sec', 'shot_classification', 'startup_flag', 'startup_event', 'stop_flag', 'stop_event', 'run_group'
         ]
         formula_columns = ['CUMULATIVE COUNT', 'RUN DURATION', 'TIME BUCKET']
 
@@ -1233,6 +1234,7 @@ def prepare_and_generate_run_based_excel(df_for_export, tolerance, downtime_gap_
                         'tool_id': 'EQUIPMENT_CODE',
                         'shot_time': 'LOCAL_SHOT_TIME',
                         'time_diff_sec': 'TIME DIFF SEC',
+                        'shot_classification': 'SHOT CLASSIFICATION',
                         'startup_flag': 'START-UP FLAG',
                         'startup_event': 'START-UP EVENT',
                         'stop_flag': 'STOP',
@@ -1243,7 +1245,7 @@ def prepare_and_generate_run_based_excel(df_for_export, tolerance, downtime_gap_
                 final_desired_renamed = [
                     'SUPPLIER_NAME', 'EQUIPMENT_CODE', 'SESSION ID', 'Shot Sequence',
                     'LOCAL_SHOT_TIME', 'APPROVED_CT', 'approved_ct', 'ACTUAL CT',
-                    'TIME DIFF SEC', 'START-UP FLAG', 'START-UP EVENT', 'STOP', 'STOP EVENT', 'run_group',
+                    'TIME DIFF SEC', 'SHOT CLASSIFICATION', 'START-UP FLAG', 'START-UP EVENT', 'STOP', 'STOP EVENT', 'run_group',
                     'CUMULATIVE COUNT', 'RUN DURATION', 'TIME BUCKET'
                 ]
                 for col in final_desired_renamed:
