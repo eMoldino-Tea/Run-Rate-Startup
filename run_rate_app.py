@@ -216,8 +216,8 @@ def render_trends_tab(df_tool, tolerance, downtime_gap_tolerance,
             'MTBF (min)': mtbf,
             'Total Shots': total_shots,
             'Normal Shots': normal_shots, 
-            'Start-ups (Within Mode CT)': su_within,
-            'Start-ups (Outside Mode CT)': su_outside,
+            'Within mode CT': su_within,
+            'Outside mode CT': su_outside,
             'Stop Events': stops,
             'Production Time (h)': prod_time / 3600,
             'Downtime (h)': downtime / 3600,
@@ -236,7 +236,7 @@ def render_trends_tab(df_tool, tolerance, downtime_gap_tolerance,
             'Stability Index (%)': '{:.1f}', 'Efficiency (%)': '{:.1f}',
             'MTTR (min)': '{:.1f}', 'MTBF (min)': '{:.1f}',
             'Total Shots': '{:,.0f}', 'Normal Shots': '{:,.0f}', 
-            'Start-ups (Within Mode CT)': '{:,.0f}', 'Start-ups (Outside Mode CT)': '{:,.0f}',
+            'Within mode CT': '{:,.0f}', 'Outside mode CT': '{:,.0f}',
             'Stop Events': '{:,.0f}', 'Production Time (h)': '{:.1f}', 'Downtime (h)': '{:.1f}',
         }).background_gradient(subset=['Stability Index (%)'],
                                cmap='RdYlGn', vmin=0, vmax=100),
@@ -719,7 +719,7 @@ def render_dashboard(df_tool, tool_id_selection, tolerance, downtime_gap_toleran
                 f'color:#FFFFFF;padding:3px 8px;border-radius:10px;'
                 f'font-size:0.8rem;font-weight:bold;">{su_p:.1f}% of Total</span>'
                 f'<div style="font-size:0.75rem; color:var(--text-color); opacity:0.8; margin-top:5px;">'
-                f'<b>{su_within:,}</b> Within Mode CT &nbsp;|&nbsp; <b>{su_outside:,}</b> Outside'
+                f'<b>{su_within:,}</b> Within mode CT &nbsp;|&nbsp; <b>{su_outside:,}</b> Outside mode CT'
                 f'</div>',
                 unsafe_allow_html=True
             )
@@ -919,9 +919,9 @@ def render_dashboard(df_tool, tool_id_selection, tolerance, downtime_gap_toleran
                 
                 # Format sub-categories
                 if 'su_within_mode' in d_df.columns:
-                    d_df['Start-ups (Within Mode CT)'] = d_df['su_within_mode'].apply(lambda x: f"{x:,}")
+                    d_df['Within mode CT'] = d_df['su_within_mode'].apply(lambda x: f"{x:,}")
                 if 'su_outside_mode' in d_df.columns:
-                    d_df['Start-ups (Outside Mode CT)'] = d_df['su_outside_mode'].apply(lambda x: f"{x:,}")
+                    d_df['Outside mode CT'] = d_df['su_outside_mode'].apply(lambda x: f"{x:,}")
 
                 if 'stopped_shots' not in d_df.columns:
                     d_df['stopped_shots'] = d_df[total_shots_col] - d_df.get('normal_shots', 0) - d_df.get('startup_shots', 0)
@@ -969,7 +969,7 @@ def render_dashboard(df_tool, tool_id_selection, tolerance, downtime_gap_toleran
 
                 final_cols = [
                     'RUN ID', 'Period (date/time from to)', 'Total shots',
-                    'Normal Shots', 'Start-ups (Within Mode CT)', 'Start-ups (Outside Mode CT)', 'Stop Events', 'Mode CT (for the run)',
+                    'Normal Shots', 'Within mode CT', 'Outside mode CT', 'Stop Events', 'Mode CT (for the run)',
                     'Approved CT', 'Lower limit CT (sec)', 'Upper Limit CT (sec)',
                     'Total Run duration (d/h/m)', 'Production Time (d/h/m)',
                     'Downtime (d/h/m)', 'MTTR (min)', 'MTBF (min)', 'Stability (%)'
@@ -1192,7 +1192,7 @@ def render_dashboard(df_tool, tool_id_selection, tolerance, downtime_gap_toleran
 # --- 4. MAIN APP ENTRY POINT ---
 # ==============================================================================
 
-APP_VERSION = "v3.71"
+APP_VERSION = "v3.72"
 
 def run_run_rate_ui():
 

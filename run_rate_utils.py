@@ -65,7 +65,7 @@ def get_renamed_summary_df(df_in):
         'run_label': 'RUN ID', 'stops': 'Stops', 'STOPS': 'Stops',
         'total_shots': 'Total Shots', 'Total Shots': 'Total Shots',
         'normal_shots': 'Normal Shots', 
-        'su_within_mode': 'Start-ups (Within Mode CT)', 'su_outside_mode': 'Start-ups (Outside Mode CT)', 
+        'su_within_mode': 'Within mode CT', 'su_outside_mode': 'Outside mode CT', 
         'mttr_min': 'MTTR (min)', 'MTTR (min)': 'MTTR (min)',
         'mtbf_min': 'MTBF (min)', 'MTBF (min)': 'MTBF (min)',
         'stability_index': 'Stability Index (%)', 'STABILITY %': 'Stability Index (%)',
@@ -80,7 +80,7 @@ def get_renamed_summary_df(df_in):
 
     display_order = [
         'Hour', 'Date', 'Week', 'RUN ID', 'Approved CT', 'Mode CT',
-        'Stops', 'Total Shots', 'Normal Shots', 'Start-ups (Within Mode CT)', 'Start-ups (Outside Mode CT)', 'Stability Index (%)', 'MTTR (min)', 'MTBF (min)'
+        'Stops', 'Total Shots', 'Normal Shots', 'Within mode CT', 'Outside mode CT', 'Stability Index (%)', 'MTTR (min)', 'MTBF (min)'
     ]
     final_cols = [col for col in display_order if col in df_renamed.columns]
     for col in df_renamed.columns:
@@ -250,8 +250,8 @@ class RunRateCalculator:
         shots = hourly_groups.size().rename('total_shots')
         
         if 'shot_classification' in df.columns:
-            su_within = df[df['shot_classification'] == 'Start-up shot within mode CT'].groupby('hour').size().rename('su_within_mode')
-            su_outside = df[df['shot_classification'] == 'Start-up shot outside mode CT'].groupby('hour').size().rename('su_outside_mode')
+            su_within = df[df['shot_classification'] == 'Within mode CT'].groupby('hour').size().rename('su_within_mode')
+            su_outside = df[df['shot_classification'] == 'Outside mode CT'].groupby('hour').size().rename('su_outside_mode')
         else:
             su_within = pd.Series(0, index=hourly_groups.indices.keys(), name='su_within_mode')
             su_outside = pd.Series(0, index=hourly_groups.indices.keys(), name='su_outside_mode')
@@ -368,8 +368,8 @@ class RunRateCalculator:
             cond_startup_outside = (df['startup_flag'] == 1) & (is_abnormal | is_hard_stop | is_time_gap)
 
             df['shot_classification'] = 'Normal Production'
-            df.loc[cond_startup_within, 'shot_classification'] = 'Start-up shot within mode CT'
-            df.loc[cond_startup_outside, 'shot_classification'] = 'Start-up shot outside mode CT'
+            df.loc[cond_startup_within, 'shot_classification'] = 'Within mode CT'
+            df.loc[cond_startup_outside, 'shot_classification'] = 'Outside mode CT'
 
             # Force stop_flag = 0 for all start-up shots to perfectly isolate them from MTTR/MTBF
             df['stop_flag'] = np.where(
@@ -384,8 +384,8 @@ class RunRateCalculator:
             df['stop_flag'] = np.where(is_time_gap | is_abnormal | is_hard_stop, 1, 0)
             df['shot_classification'] = np.where(df['stop_flag'] == 1, 'Stopped Shot', 'Normal Production')
         
-        # Start-up Event (flags the beginning shot of a startup sequence)
-        df['startup_event'] = np.where((df['startup_flag'] == 1) & (df.groupby('tool_id')['startup_flag'].shift(1, fill_value=0) == 0), 1, 0)
+        # Start-up Event (flags the beginning shot of a startup sequence) yielding a Boolean for checkbox display
+        df['startup_event'] = (df['startup_flag'] == 1) & (df.groupby('tool_id')['startup_flag'].shift(1, fill_value=0) == 0)
 
         # Override rules for the very first shot of any run to ensure it is never a stop
         override_mask = mask_first_shot | is_new_run
@@ -545,8 +545,8 @@ def _run_metrics_from_processed(df_slice: pd.DataFrame) -> dict:
     tot_stops = df_slice['stop_event'].sum()
     tot_shots = len(df_slice)
     
-    su_within = (df_slice['shot_classification'] == 'Start-up shot within mode CT').sum() if 'shot_classification' in df_slice.columns else 0
-    su_outside = (df_slice['shot_classification'] == 'Start-up shot outside mode CT').sum() if 'shot_classification' in df_slice.columns else 0
+    su_within = (df_slice['shot_classification'] == 'Within mode CT').sum() if 'shot_classification' in df_slice.columns else 0
+    su_outside = (df_slice['shot_classification'] == 'Outside mode CT').sum() if 'shot_classification' in df_slice.columns else 0
     
     startup_shots = su_within + su_outside
     normal_shots = len(prod_df) - startup_shots
@@ -823,8 +823,8 @@ def plot_shot_bar_chart(df, lower_limit, upper_limit, mode_ct,
 
     conditions = [
         df['shot_classification'] == 'Normal Production',
-        df['shot_classification'] == 'Start-up shot within mode CT',
-        df['shot_classification'] == 'Start-up shot outside mode CT',
+        df['shot_classification'] == 'Within mode CT',
+        df['shot_classification'] == 'Outside mode CT',
         df['shot_classification'] == 'Stopped Shot'
     ]
     choices = [
@@ -862,8 +862,8 @@ def plot_shot_bar_chart(df, lower_limit, upper_limit, mode_ct,
     
     # Legend Entries
     fig.add_trace(go.Bar(x=[None], y=[None], name="Normal Shot", marker_color='#3498DB', showlegend=True))
-    fig.add_trace(go.Bar(x=[None], y=[None], name="Start-up (Within Mode CT)", marker_color='#9b59b6', showlegend=True))
-    fig.add_trace(go.Bar(x=[None], y=[None], name="Start-up (Outside Mode CT)", marker_color='#e67e22', showlegend=True))
+    fig.add_trace(go.Bar(x=[None], y=[None], name="Within mode CT", marker_color='#9b59b6', showlegend=True))
+    fig.add_trace(go.Bar(x=[None], y=[None], name="Outside mode CT", marker_color='#e67e22', showlegend=True))
     fig.add_trace(go.Bar(x=[None], y=[None], name="Stopped Shot", marker_color=PASTEL_COLORS['red'], showlegend=True))
     
     fig.add_trace(go.Scatter(
@@ -1608,10 +1608,10 @@ def generate_excel_report(all_runs_data, tolerance):
                         continue
 
                     cell_format = data_format
-                    if col_name in ['STOP', 'STARTUP FLAG', 'STARTUP EVENT']:
+                    if col_name in ['STOP', 'STARTUP FLAG']:
                         ws.write_number(current_row_excel_idx, c_idx,
                                         int(value) if pd.notna(value) else 0, cell_format)
-                    elif col_name == 'STOP EVENT':
+                    elif col_name in ['STOP EVENT', 'STARTUP EVENT']:
                         ws.write_number(current_row_excel_idx, c_idx,
                                         1 if value is True else 0, cell_format)
                     elif isinstance(value, pd.Timestamp):
@@ -1910,8 +1910,8 @@ def generate_weekly_comparison_pptx(df_weekly: pd.DataFrame, tool_id: str) -> by
         ("MTTR",                  "MTTR (min)",              "{:.1f} min", False),
         ("MTBF",                  "MTBF (min)",              "{:.1f} min", True),
         ("Normal Shots",          "Normal Shots",            "{:,.0f}",   True),
-        ("Start-ups (Within)",    "Start-ups (Within Mode CT)",  "{:,.0f}",   True),
-        ("Start-ups (Outside)",   "Start-ups (Outside Mode CT)", "{:,.0f}",   True),
+        ("Within mode CT",        "Within mode CT",          "{:,.0f}",   True),
+        ("Outside mode CT",       "Outside mode CT",         "{:,.0f}",   True),
         ("Stop Events",           "Stop Events",             "{:.0f}",    False),
     ]
 
@@ -1924,7 +1924,7 @@ def generate_weekly_comparison_pptx(df_weekly: pd.DataFrame, tool_id: str) -> by
         if col not in df.columns:
             totals[col] = None
             continue
-        if col in ("Total Shots", "Normal Shots", "Start-ups (Within Mode CT)", "Start-ups (Outside Mode CT)", "Stop Events"):
+        if col in ("Total Shots", "Normal Shots", "Within mode CT", "Outside mode CT", "Stop Events"):
             totals[col] = df[col].sum()
         else:
             totals[col] = df[col].mean()
@@ -2077,7 +2077,7 @@ def generate_weekly_comparison_pptx(df_weekly: pd.DataFrame, tool_id: str) -> by
     tf3 = note_box.text_frame
     p3  = tf3.paragraphs[0]
     r3  = p3.add_run()
-    r3.text  = f"Generated by Run Rate Analysis v3.71  |  Tool: {tool_id}  |  {pd.Timestamp.now().strftime('%d %b %Y')}"
+    r3.text  = f"Generated by Run Rate Analysis v3.72  |  Tool: {tool_id}  |  {pd.Timestamp.now().strftime('%d %b %Y')}"
     r3.font.size   = Pt(8)
     r3.font.italic = True
     r3.font.color.rgb = rgb("9E9E9E")
