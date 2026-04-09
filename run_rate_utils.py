@@ -90,7 +90,7 @@ def get_renamed_summary_df(df_in):
 
 
 @st.cache_data
-def load_all_data(files, dayfirst=True, _cache_version=None):
+def load_all_data(files, date_format="ISO / Default (YYYY-MM-DD)", _cache_version=None):
     df_list = []
     for file in files:
         try:
@@ -133,7 +133,14 @@ def load_all_data(files, dayfirst=True, _cache_version=None):
             else:
                 shot_time_col = get_col("LOCAL_SHOT_TIME", "SHOT TIME", "TIMESTAMP", "DATE", "TIME")
                 if shot_time_col:
-                    parsed = pd.to_datetime(df[shot_time_col], format="mixed", dayfirst=dayfirst, errors="coerce")
+                    if date_format == "Global (DD/MM/YYYY)":
+                        parsed = pd.to_datetime(df[shot_time_col], format="mixed", dayfirst=True, errors="coerce")
+                    elif date_format == "US (MM/DD/YYYY)":
+                        parsed = pd.to_datetime(df[shot_time_col], format="mixed", dayfirst=False, errors="coerce")
+                    else:
+                        # Ensures proper Year-Month-Day parsing
+                        parsed = pd.to_datetime(df[shot_time_col], format="mixed", yearfirst=True, dayfirst=False, errors="coerce")
+                        
                     df["shot_time"] = parsed
 
             session_col = get_col("COUNTER_CODE", "SESSION ID")

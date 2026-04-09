@@ -868,8 +868,7 @@ def run_run_rate_ui():
     st.sidebar.title("File Upload")
     
     # NEW FIX: Explicit Date Format Fallback
-    date_format = st.sidebar.radio("Date Format (if ambiguous)", ["Global (DD/MM/YYYY)", "US (MM/DD/YYYY)"])
-    dayfirst_setting = (date_format == "Global (DD/MM/YYYY)")
+    date_format = st.sidebar.radio("Date Format (if ambiguous)", ["ISO / Default (YYYY-MM-DD)", "Global (DD/MM/YYYY)", "US (MM/DD/YYYY)"])
     
     uploaded_files = st.sidebar.file_uploader(
         "Upload one or more Run Rate files (Excel / CSV)",
@@ -880,7 +879,7 @@ def run_run_rate_ui():
         st.info("👈 Upload one or more production data files to begin.")
         st.stop()
 
-    df_all = rr_utils.load_all_data(uploaded_files, dayfirst=dayfirst_setting, _cache_version=APP_VERSION)
+    df_all = rr_utils.load_all_data(uploaded_files, date_format=date_format, _cache_version=APP_VERSION)
 
     id_col = "tool_id"
     if id_col not in df_all.columns:
