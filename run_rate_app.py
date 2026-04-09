@@ -1014,7 +1014,7 @@ def render_dashboard(df_tool, tool_id_selection, tolerance, downtime_gap_toleran
                         [c for c in cols_bucket if c in complete_runs.columns]
                     ].rename(columns={
                         'run_group': 'Run Group', 'duration_min': 'Duration (min)',
-                        'time_bucket': 'Time Bucket', 'run End Date/Time': 'Run End Date/Time',
+                        'time_bucket': 'Time Bucket', 'run_end_time': 'Run End Date/Time',
                         'run_label': 'Run ID'
                     })
                     st.dataframe(df_bucket_data)
