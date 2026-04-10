@@ -289,7 +289,9 @@ class RunRateCalculator:
         # START-UP SHOT LOGIC
         df['shot_seq_in_run'] = df.groupby('run_id').cumcount() + 1
         df['startup_flag'] = np.where(df['shot_seq_in_run'] <= self.startup_shots_count, 1, 0)
-        df['startup_event'] = (df['startup_flag'] == 1)
+        
+        # Start-up event applies strictly to the FIRST shot of the sequence.
+        df['startup_event'] = (df['shot_seq_in_run'] == 1) & (df['startup_flag'] == 1)
 
         run_modes = (df[df['ACTUAL CT'] < 1000]
                      .groupby('run_id')['ACTUAL CT']

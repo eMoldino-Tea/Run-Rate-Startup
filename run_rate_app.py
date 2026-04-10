@@ -571,7 +571,7 @@ def render_dashboard(df_tool, tool_id_selection, tolerance, downtime_gap_toleran
             st.markdown(f'<span style="background-color:purple;color:#FFFFFF;padding:3px 8px;border-radius:10px;font-size:0.8rem;font-weight:bold;">{su_p:.1f}% of Total</span>', unsafe_allow_html=True)
             st.caption(f"Within Mode CT: {summary_metrics.get('startup_within', 0)} | Outside Mode CT: {summary_metrics.get('startup_outside', 0)}")
         with c4:
-            st.metric("Stop Shots", f"{st_s:,}")
+            st.metric("Stop Events", f"{summary_metrics.get('stop_events', 0)}")
             st.markdown(f'<span style="background-color:{rr_utils.PASTEL_COLORS["red"]};color:#0E1117;padding:3px 8px;border-radius:10px;font-size:0.8rem;font-weight:bold;">{s_p:.1f}% Stopped Shots</span>', unsafe_allow_html=True)
 
     def fmt_metric(min_val, max_val):
