@@ -854,7 +854,7 @@ def render_dashboard(df_tool, tool_id_selection, tolerance, downtime_gap_toleran
 # --- 4. MAIN APP ENTRY POINT ---
 # ==============================================================================
 
-APP_VERSION = "v3.60"
+APP_VERSION = "v3.61"
 
 def run_run_rate_ui():
 
@@ -877,6 +877,7 @@ def run_run_rate_ui():
         st.info("👈 Upload one or more production data files to begin.")
         st.stop()
 
+    # Files are strictly parsed in YYYY-MM-DD ISO format automatically
     df_all = rr_utils.load_all_data(uploaded_files, _cache_version=APP_VERSION)
 
     id_col = "tool_id"

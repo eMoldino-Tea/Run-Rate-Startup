@@ -133,6 +133,7 @@ def load_all_data(files, _cache_version=None):
             else:
                 shot_time_col = get_col("LOCAL_SHOT_TIME", "SHOT TIME", "TIMESTAMP", "DATE", "TIME")
                 if shot_time_col:
+                    # Strictly using ISO Format
                     parsed = pd.to_datetime(df[shot_time_col], format="mixed", yearfirst=True, dayfirst=False, errors="coerce")
                     df["shot_time"] = parsed
 
@@ -752,8 +753,10 @@ def plot_shot_bar_chart(df, lower_limit, upper_limit, mode_ct,
         return
     df = df.copy()
     
-    df['color'] = np.where(df['startup_flag'] == 1, 'purple', 
-                  np.where(df['stop_flag'] == 1, PASTEL_COLORS['red'], '#3498DB'))
+    # Updated color mapping using the new classification logic
+    df['color'] = np.where(df['shot_classification'] == 'Start Up Shot within Mode CT', 'purple', 
+                  np.where(df['shot_classification'] == 'Start Up Shot outside Mode CT', PASTEL_COLORS['orange'],
+                  np.where(df['stop_flag'] == 1, PASTEL_COLORS['red'], '#3498DB')))
 
     downtime_gap_indices = df[df['adj_ct_sec'] != df['ACTUAL CT']].index
     valid_downtime_gap_indices = downtime_gap_indices[downtime_gap_indices > 0]
@@ -783,8 +786,13 @@ def plot_shot_bar_chart(df, lower_limit, upper_limit, mode_ct,
                          marker_color='#3498DB', showlegend=True))
     fig.add_trace(go.Bar(x=[None], y=[None], name="Stopped Shot",
                          marker_color=PASTEL_COLORS['red'], showlegend=True))
-    fig.add_trace(go.Bar(x=[None], y=[None], name="Start-up Shot",
+    
+    # Updated discrete legend for both start-up types
+    fig.add_trace(go.Bar(x=[None], y=[None], name="Start Up Shot within Mode CT",
                          marker_color='purple', showlegend=True))
+    fig.add_trace(go.Bar(x=[None], y=[None], name="Start Up Shot outside Mode CT",
+                         marker_color=PASTEL_COLORS['orange'], showlegend=True))
+                         
     fig.add_trace(go.Scatter(
         x=[None], y=[None], mode='lines', line=dict(width=0),
         fill='tozeroy', fillcolor='rgba(119, 221, 119, 0.3)',
